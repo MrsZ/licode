@@ -9,33 +9,56 @@
 using testing::_;
 using testing::Return;
 using testing::Eq;
+using erizo::DataPacket;
+using erizo::MediaEventPtr;
 
 static const char kArbitraryPeerId[] = "111";
 
 class MockPublisher: public erizo::MediaSource, public erizo::FeedbackSink {
  public:
   MockPublisher() {
-    videoSourceSSRC_ = 1;
-    audioSourceSSRC_ = 2;
-    sourcefbSink_ = this;
+    video_source_ssrc_list_[0] = 1;
+    audio_source_ssrc_ = 2;
+    source_fb_sink_ = this;
   }
   ~MockPublisher() {}
-  void close() override {}
-  int sendPLI() { return 0; }
+  boost::future<void> close() override {
+    std::shared_ptr<boost::promise<void>> p = std::make_shared<boost::promise<void>>();
+    p->set_value();
+    return p->get_future();
+  }
+  int sendPLI() override { return 0; }
+  int deliverFeedback_(std::shared_ptr<DataPacket> packet) override {
+    return internalDeliverFeedback_(packet);
+  }
 
-  MOCK_METHOD2(deliverFeedback_, int(char*, int));
+  MOCK_METHOD1(internalDeliverFeedback_, int(std::shared_ptr<DataPacket>));
 };
 
 class MockSubscriber: public erizo::MediaSink, public erizo::FeedbackSource {
  public:
   MockSubscriber() {
-    sinkfbSource_ = this;
+    sink_fb_source_ = this;
   }
   ~MockSubscriber() {}
-  void close() override {}
+  boost::future<void> close() override {
+    std::shared_ptr<boost::promise<void>> p = std::make_shared<boost::promise<void>>();
+    p->set_value();
+    return p->get_future();
+  }
+  int deliverAudioData_(std::shared_ptr<DataPacket> packet) override {
+    return internalDeliverAudioData_(packet);
+  }
+  int deliverVideoData_(std::shared_ptr<DataPacket> packet) override {
+    return internalDeliverVideoData_(packet);
+  }
+  int deliverEvent_(MediaEventPtr event) override {
+    return internalDeliverEvent_(event);
+  }
 
-  MOCK_METHOD2(deliverAudioData_, int(char*, int));
-  MOCK_METHOD2(deliverVideoData_, int(char*, int));
+  MOCK_METHOD1(internalDeliverAudioData_, int(std::shared_ptr<DataPacket>));
+  MOCK_METHOD1(internalDeliverVideoData_, int(std::shared_ptr<DataPacket>));
+  MOCK_METHOD1(internalDeliverEvent_, int(MediaEventPtr));
 };
 
 class OneToManyProcessorTest : public ::testing::Test {
@@ -86,25 +109,25 @@ TEST_F(OneToManyProcessorTest, deliverFeedback_CallsPublisher_WhenCalled) {
   erizo::RtpHeader header;
   header.setSeqNumber(12);
 
-  EXPECT_CALL(*publisher.get(), deliverFeedback_(_, _)).Times(1).WillOnce(Return(0));
-  otm.deliverFeedback(reinterpret_cast<char*>(&header),
-                      sizeof(erizo::RtpHeader));
+  EXPECT_CALL(*publisher.get(), internalDeliverFeedback_(_)).Times(1).WillOnce(Return(0));
+  otm.deliverFeedback(std::make_shared<DataPacket>(0, reinterpret_cast<char*>(&header),
+                      sizeof(erizo::RtpHeader), erizo::VIDEO_PACKET));
 }
 
 TEST_F(OneToManyProcessorTest, deliverVideoData_CallsSubscriber_whenCalled) {
   erizo::RtpHeader header;
   header.setSeqNumber(12);
 
-  EXPECT_CALL(*subscriber, deliverVideoData_(_, _)).Times(1).WillOnce(Return(0));
-  otm.deliverVideoData(reinterpret_cast<char*>(&header),
-                       sizeof(erizo::RtpHeader));
+  EXPECT_CALL(*subscriber, internalDeliverVideoData_(_)).Times(1).WillOnce(Return(0));
+  otm.deliverVideoData(std::make_shared<DataPacket>(0, reinterpret_cast<char*>(&header),
+                       sizeof(erizo::RtpHeader), erizo::VIDEO_PACKET));
 }
 
 TEST_F(OneToManyProcessorTest, deliverAudioData_CallsSubscriber_whenCalled) {
   erizo::RtpHeader header;
   header.setSeqNumber(12);
 
-  EXPECT_CALL(*subscriber, deliverAudioData_(_, _)).Times(1).WillOnce(Return(0));
-  otm.deliverAudioData(reinterpret_cast<char*>(&header),
-                       sizeof(erizo::RtpHeader));
+  EXPECT_CALL(*subscriber, internalDeliverAudioData_(_)).Times(1).WillOnce(Return(0));
+  otm.deliverAudioData(std::make_shared<DataPacket>(0, reinterpret_cast<char*>(&header),
+                       sizeof(erizo::RtpHeader), erizo::AUDIO_PACKET));
 }

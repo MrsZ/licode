@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 SCRIPT=`pwd`/$0
 FILENAME=`basename $SCRIPT`
@@ -8,6 +8,8 @@ BUILD_DIR=$ROOT/build
 CURRENT_DIR=`pwd`
 NVM_CHECK="$PATHNAME"/checkNvm.sh
 EXTRAS=$ROOT/extras
+
+cp $ROOT/nuve/nuveClient/dist/nuve.js $EXTRAS/basic_example/
 
 . $NVM_CHECK
 

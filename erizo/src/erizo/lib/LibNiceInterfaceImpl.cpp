@@ -4,11 +4,15 @@
 
 #include "./LibNiceInterface.h"
 #include <nice/nice.h>
+#include <nice/interfaces.h>
 
 namespace erizo {
 
   NiceAgent* LibNiceInterfaceImpl::NiceAgentNew(GMainContext* context) {
     return nice_agent_new(context, NICE_COMPATIBILITY_RFC5245);
+  }
+  char* LibNiceInterfaceImpl::NiceInterfacesGetIpForInterface(const char *interface_name) {
+    return nice_interfaces_get_ip_for_interface(const_cast<char*>(interface_name));
   }
   int LibNiceInterfaceImpl::NiceAgentAddStream(NiceAgent* agent, unsigned int n_components) {
     return nice_agent_add_stream(agent, n_components);
@@ -20,6 +24,12 @@ namespace erizo {
   void LibNiceInterfaceImpl::NiceAgentSetPortRange(NiceAgent* agent, unsigned int stream_id,
       unsigned int component_id, unsigned int min_port, unsigned int max_port) {
     return nice_agent_set_port_range(agent, stream_id, component_id, min_port, max_port);
+  }
+  bool LibNiceInterfaceImpl::NiceAgentAddLocalAddress(NiceAgent* agent, const char *ip) {
+    NiceAddress addr;
+    nice_address_init(&addr);
+    nice_address_set_from_string(&addr, ip);
+    return nice_agent_add_local_address(agent, &addr);
   }
   bool LibNiceInterfaceImpl::NiceAgentGetSelectedPair(NiceAgent* agent, unsigned int stream_id,
       unsigned int component_id, NiceCandidate** local, NiceCandidate** remote) {
@@ -53,13 +63,7 @@ namespace erizo {
   }
   int LibNiceInterfaceImpl::NiceAgentSend(NiceAgent* agent, unsigned int stream_id, unsigned int component_id,
       unsigned int len, const char* buf) {
-    GError *error = NULL;
-    GOutputVector vec[1] = {
-        { buf, len }
-    };
-    NiceOutputMessage message = {vec, G_N_ELEMENTS(vec)};
-
-    return nice_agent_send_messages_nonblocking(agent, stream_id, component_id, &message, 1, NULL, &error);
+    return nice_agent_send(agent, stream_id, component_id, len, buf);
   }
 
 }  // namespace erizo

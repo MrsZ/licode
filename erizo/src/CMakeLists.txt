@@ -1,7 +1,16 @@
 cmake_minimum_required(VERSION 2.6)
 
+find_package(PkgConfig)
+#functions
+function(test_lib LIB_NAME)
+  if (${LIB_NAME} MATCHES "^.*-NOTFOUND")
+    message(FATAL_ERROR "lib not found: " ${LIB_NAME} " check README")
+    return()
+  endif(${LIB_NAME} MATCHES "^.*-NOTFOUND")
+endfunction(test_lib)
 
 include(ExternalProject)
+
 project (ERIZO_ALL)
 
 if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
@@ -24,7 +33,7 @@ set(ERIZO_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 
 set(CMAKE_MACOSX_RPATH 1)
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/" "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/")
 find_package (Doxygen)
 if(DOXYGEN_FOUND)
   configure_file("${CMAKE_CURRENT_SOURCE_DIR}/Doxyfile.in" "${CMAKE_CURRENT_BINARY_DIR}/Doxyfile" @ONLY)
@@ -49,24 +58,84 @@ add_custom_target(lint
 set(THIRD_PARTY_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../build/libdeps/build/include/")
 set(THIRD_PARTY_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../../build/libdeps/build/lib/")
 
-#webrtc
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/third_party/webrtc/src")
+## Depencencies
 
-#erizo
+# Add /usr/local/include
+IF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+  include_directories("/usr/local/include")
+ENDIF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+
+# GLIB
+find_package(Glib REQUIRED)
+include_directories(${GLIB_INCLUDE_DIRS})
+
+# BOOST
+include(${CMAKE_CURRENT_SOURCE_DIR}/../conan_paths.cmake)
+set (BOOST_LIBS thread regex system)
+find_package(boost)
+include_directories(${boost_INCLUDE_DIRS})
+
+set(ERIZO_CMAKE_CXX_FLAGS "${ERIZO_CMAKE_CXX_FLAGS} -DBOOST_THREAD_PROVIDES_FUTURE -DBOOST_THREAD_PROVIDES_FUTURE_CONTINUATION -DBOOST_THREAD_PROVIDES_FUTURE_WHEN_ALL_WHEN_ANY")
+
+# GTHREAD
+find_library(GTHREAD gthread-2.0 HINTS "${THIRD_PARTY_LIB}")
+test_lib(${GTHREAD})
+
+# SRTP
+find_library(SRTP srtp2 HINTS "${THIRD_PARTY_LIB}")
+test_lib(${SRTP})
+
+# NICE
+find_library(NICE nice HINTS "${THIRD_PARTY_LIB}")
+test_lib(${NICE})
+
+# OPENSSL
+find_library(SSL ssl HINTS "${THIRD_PARTY_LIB}")
+test_lib(${SSL})
+find_library(CRYPTO crypto HINTS "${THIRD_PARTY_LIB}")
+test_lib(${CRYPTO})
+
+# Libav
+find_library(AVUTIL avutil HINTS "${THIRD_PARTY_LIB}")
+test_lib(${AVUTIL})
+set (LIBS ${AVUTIL})
+find_library(AVCODEC avcodec HINTS "${THIRD_PARTY_LIB}")
+test_lib(${AVCODEC})
+set (LIBS ${LIBS} ${AVCODEC})
+find_library(AVFORMAT avformat HINTS "${THIRD_PARTY_LIB}")
+test_lib(${AVFORMAT})
+set (LIBS ${LIBS} ${AVFORMAT})
+
+# LOG4CXX
+find_library(LOG log4cxx)
+test_lib(${LOG})
+
+# WEBRTC
+include("${CMAKE_CURRENT_SOURCE_DIR}/third_party/webrtc.cmake")
+
+# NICER
+include("${CMAKE_CURRENT_SOURCE_DIR}/third_party/nicer.cmake")
+
+## Erizo
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/erizo")
 
-#examples
+## Examples
 if(COMPILE_EXAMPLES)
   add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/examples")
 endif(COMPILE_EXAMPLES)
 
-#tests
+## Tests
+if(${ERIZO_BUILD_TYPE} STREQUAL "sanitizer")
+  set(SANITIZER_OPTION "-DCMAKE_CXX_FLAGS=-fsanitize=address")
+else()
+  set(SANITIZER_OPTION "")
+endif()
 set(GMOCK_BUILD "${CMAKE_CURRENT_BINARY_DIR}/libdeps/gmock")
 set(GMOCK_VERSION "1.8.0")
 ExternalProject_Add(gtest
   URL "https://github.com/google/googletest/archive/release-${GMOCK_VERSION}.tar.gz"
   PREFIX ${GMOCK_BUILD}
-  CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${GMOCK_BUILD}
+  CMAKE_ARGS -DCMAKE_INSTALL_PREFIX:PATH=${GMOCK_BUILD} ${SANITIZER_OPTION}
 )
 
 enable_testing()

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
@@ -9,6 +9,7 @@ ROOT=$PATHNAME/..
 BUILD_DIR=$ROOT/build
 CURRENT_DIR=`pwd`
 NVM_CHECK="$PATHNAME"/checkNvm.sh
+FAST_MAKE=''
 
 LIB_DIR=$BUILD_DIR/libdeps
 PREFIX_DIR=$LIB_DIR/build/
@@ -36,7 +37,8 @@ parse_arguments(){
       "--use-cache")
         CACHE=true
         ;;
-
+      "--fast")
+        FAST_MAKE='-j4'
     esac
     shift
   done
@@ -67,7 +69,7 @@ install_nvm_node() {
     if [ ! -s "$NVM_DIR/nvm.sh" ]; then
       git clone https://github.com/creationix/nvm.git "$NVM_DIR"
       cd "$NVM_DIR"
-      git checkout `git describe --abbrev=0 --tags --match "v[0-9]*" origin` 
+      git checkout `git describe --abbrev=0 --tags --match "v[0-9]*" origin`
       cd "$CURRENT_DIR"
     fi
     . $NVM_CHECK
@@ -90,10 +92,12 @@ install_homebrew(){
 }
 
 install_brew_deps(){
-  brew install glib pkg-config boost cmake yasm log4cxx gettext coreutils
+  brew install glib pkg-config boost cmake yasm log4cxx gettext coreutils conan
   install_nvm_node
   nvm use
+  npm install
   npm install -g node-gyp
+  npm install gulp@3.9.1 gulp-eslint@3 run-sequence@2.2.1 webpack-stream@4.0.0 google-closure-compiler-js@20170521.0.0 del@3.0.0 gulp-sourcemaps@2.6.4 script-loader@0.7.2 expose-loader@0.7.5
   if [ "$DISABLE_SERVICES" != "true" ]; then
     brew install rabbitmq mongodb
   fi
@@ -103,12 +107,12 @@ download_openssl() {
   OPENSSL_VERSION=$1
   OPENSSL_MAJOR="${OPENSSL_VERSION%?}"
   echo "Downloading OpenSSL from https://www.openssl.org/source/$OPENSSL_MAJOR/openssl-$OPENSSL_VERSION.tar.gz"
-  curl -O https://www.openssl.org/source/openssl-$OPENSSL_VERSION.tar.gz
+  curl -OL https://www.openssl.org/source/openssl-$OPENSSL_VERSION.tar.gz
   tar -zxvf openssl-$OPENSSL_VERSION.tar.gz || DOWNLOAD_SUCCESS=$?
   if [ "$DOWNLOAD_SUCCESS" -eq 1 ]
   then
     echo "Downloading OpenSSL from https://www.openssl.org/source/old/$OPENSSL_MAJOR/openssl-$OPENSSL_VERSION.tar.gz"
-    curl -O https://www.openssl.org/source/old/$OPENSSL_MAJOR/openssl-$OPENSSL_VERSION.tar.gz
+    curl -OL https://www.openssl.org/source/old/$OPENSSL_MAJOR/openssl-$OPENSSL_VERSION.tar.gz
     tar -zxvf openssl-$OPENSSL_VERSION.tar.gz
   fi
 }
@@ -120,7 +124,7 @@ install_openssl(){
     if [ ! -f ./openssl-$OPENSSL_VERSION.tar.gz ]; then
       download_openssl $OPENSSL_VERSION
       cd openssl-$OPENSSL_VERSION
-      ./Configure --prefix=$PREFIX_DIR darwin64-x86_64-cc -shared -fPIC && make -s V=0 && make install_sw
+      ./Configure --prefix=$PREFIX_DIR --openssldir=$PREFIX_DIR darwin64-x86_64-cc -shared -fPIC && make $FAST_MAKE -s V=0 && make install_sw
     else
       echo "openssl already installed"
     fi
@@ -135,11 +139,12 @@ install_openssl(){
 install_libnice(){
   if [ -d $LIB_DIR ]; then
     cd $LIB_DIR
-    curl -O https://nice.freedesktop.org/releases/libnice-0.1.7.tar.gz
-    tar -zxvf libnice-0.1.7.tar.gz
-    cd libnice-0.1.7
+    curl -OL https://nice.freedesktop.org/releases/libnice-0.1.4.tar.gz
+    tar -zxvf libnice-0.1.4.tar.gz
+    cd libnice-0.1.4
     check_result $?
-    ./configure --prefix=$PREFIX_DIR && make -s V=0 && make install
+    patch -R ./agent/conncheck.c < $PATHNAME/libnice-014.patch0
+    ./configure --prefix=$PREFIX_DIR && make $FAST_MAKE -s V=0 && make install
     check_result $?
     cd $CURRENT_DIR
   else
@@ -149,24 +154,32 @@ install_libnice(){
 }
 
 install_libsrtp(){
-  cd $ROOT/third_party/srtp
-  CFLAGS="-fPIC" ./configure --enable-openssl --prefix=$PREFIX_DIR
-  make -s V=0 && make uninstall && make install
-  check_result $?
-  cd $CURRENT_DIR
+  if [ -d $LIB_DIR ]; then
+    cd $LIB_DIR
+    curl -o libsrtp-2.1.0.tar.gz https://codeload.github.com/cisco/libsrtp/tar.gz/v2.1.0
+    tar -zxvf libsrtp-2.1.0.tar.gz
+    cd libsrtp-2.1.0
+    CFLAGS="-fPIC" ./configure --enable-openssl --prefix=$PREFIX_DIR --with-openssl-dir=$PREFIX_DIR
+    make $FAST_MAKE -s V=0 && make uninstall && make install
+    check_result $?
+    cd $CURRENT_DIR
+  else
+    mkdir -p $LIB_DIR
+    install_libsrtp
+  fi
 }
 
 install_mediadeps(){
   brew install opus libvpx x264
   if [ -d $LIB_DIR ]; then
     cd $LIB_DIR
-    curl -O https://www.libav.org/releases/libav-11.6.tar.gz
-    tar -zxvf libav-11.6.tar.gz
+    curl -O -L https://github.com/libav/libav/archive/v11.6.tar.gz
+    tar -zxvf v11.6.tar.gz
     cd libav-11.6
-    curl -O https://github.com/libav/libav/commit/4d05e9392f84702e3c833efa86e84c7f1cf5f612.patch
+    curl -OL https://github.com/libav/libav/commit/4d05e9392f84702e3c833efa86e84c7f1cf5f612.patch
     patch libavcodec/libvpxenc.c 4d05e9392f84702e3c833efa86e84c7f1cf5f612.patch && \
-    PKG_CONFIG_PATH=${PREFIX_DIR}/lib/pkgconfig ./configure --prefix=$PREFIX_DIR --enable-shared --enable-gpl --enable-libvpx --enable-libx264 --enable-libopus && \
-    make -s V=0 && \
+    PKG_CONFIG_PATH=${PREFIX_DIR}/lib/pkgconfig ./configure --prefix=$PREFIX_DIR --enable-shared --enable-gpl --enable-libvpx --enable-libx264 --enable-libopus --disable-doc && \
+    make $FAST_MAKE -s V=0 && \
     make install
     check_result $?
     cd $CURRENT_DIR
@@ -180,13 +193,13 @@ install_mediadeps_nogpl(){
   brew install opus libvpx
   if [ -d $LIB_DIR ]; then
     cd $LIB_DIR
-    curl -O https://www.libav.org/releases/libav-11.6.tar.gz
-    tar -zxvf libav-11.6.tar.gz
+    curl -O -L https://github.com/libav/libav/archive/v11.6.tar.gz
+    tar -zxvf v11.6.tar.gz
     cd libav-11.6
-    curl -O https://github.com/libav/libav/commit/4d05e9392f84702e3c833efa86e84c7f1cf5f612.patch
+    curl -OL https://github.com/libav/libav/commit/4d05e9392f84702e3c833efa86e84c7f1cf5f612.patch
     patch libavcodec/libvpxenc.c 4d05e9392f84702e3c833efa86e84c7f1cf5f612.patch && \
-    PKG_CONFIG_PATH=${PREFIX_DIR}/lib/pkgconfig ./configure --prefix=$PREFIX_DIR --enable-shared --enable-libvpx --enable-libopus && \
-    make -s V=0 && \
+    PKG_CONFIG_PATH=${PREFIX_DIR}/lib/pkgconfig ./configure --prefix=$PREFIX_DIR --enable-shared --enable-libvpx --enable-libopus --disable-doc && \
+    make $FAST_MAKE -s V=0 && \
     make install
     check_result $?
     cd $CURRENT_DIR

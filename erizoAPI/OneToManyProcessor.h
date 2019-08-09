@@ -3,9 +3,9 @@
 
 #include <nan.h>
 #include <OneToManyProcessor.h>
-#include <WebRtcConnection.h>
+#include <MediaStream.h>
 #include "MediaDefinitions.h"
-#include "WebRtcConnection.h"
+#include "MediaStream.h"
 #include "ExternalInput.h"
 #include "ExternalOutput.h"
 
@@ -19,7 +19,7 @@
 class OneToManyProcessor : public MediaSink {
  public:
     static NAN_MODULE_INIT(Init);
-    erizo::OneToManyProcessor* me;
+    std::shared_ptr<erizo::OneToManyProcessor> me;
 
  private:
     OneToManyProcessor();
@@ -42,7 +42,7 @@ class OneToManyProcessor : public MediaSink {
     static NAN_METHOD(setPublisher);
     /*
      * Adds an ExternalOutput
-     * Param: The ExternalOutput   
+     * Param: The ExternalOutput
      */
     static NAN_METHOD(addExternalOutput);
     /*

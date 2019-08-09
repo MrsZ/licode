@@ -30,12 +30,12 @@ class AsyncDeleter : public Nan::AsyncWorker {
         Local<Value> argv[] = {
           Nan::New(msg.c_str()).ToLocalChecked()
         };
-        callback->Call(1, argv);
+        Nan::AsyncResource resource("erizo::addon.externalInput.deleter");
+        callback->Call(1, argv, &resource);
       }
     }
  private:
     std::shared_ptr<erizo::ExternalInput> eiToDelete_;
-    Nan::Callback* callback_;
 };
 
 ExternalInput::ExternalInput() {}
@@ -79,7 +79,7 @@ NAN_METHOD(ExternalInput::close) {
   }
 
   Nan::AsyncQueueWorker(new  AsyncDeleter(me, callback));
-  me.reset();
+  obj->me.reset();
 }
 
 NAN_METHOD(ExternalInput::init) {
@@ -99,6 +99,7 @@ NAN_METHOD(ExternalInput::setAudioReceiver) {
   erizo::MediaSink *mr = param->msink;
 
   me->setAudioSink(mr);
+  me->setEventSink(mr);
 }
 
 NAN_METHOD(ExternalInput::setVideoReceiver) {
@@ -109,4 +110,5 @@ NAN_METHOD(ExternalInput::setVideoReceiver) {
   erizo::MediaSink *mr = param->msink;
 
   me->setVideoSink(mr);
+  me->setEventSink(mr);
 }

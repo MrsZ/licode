@@ -1,9 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+oldstate="$(set +o); set -$-"                # POSIXly store all set options.
+
 set +e
 
 check_readlink() {
   if [ "$(uname)" == "Darwin" ]; then
-    # Do something under Mac OS X platform        
+    # Do something under Mac OS X platform
     READLINK="greadlink"
   elif [ "$(expr substr $(uname -s) 1 5)" == "Linux" ]; then
     # Do something under GNU/Linux platform
@@ -12,7 +15,7 @@ check_readlink() {
     echo "Unsupported OS"
     exit 1
   fi
- 
+
 }
 command -v nvm | grep 'nvm' &> /dev/null
 if [ ! $? == 0 ]; then
@@ -29,5 +32,6 @@ if [ ! $? == 0 ]; then
     echo "ERROR: Missing NVM"
     exit 1
   fi
-fi 
+fi
 
+eval "$oldstate"         # restore all options stored.

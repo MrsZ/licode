@@ -1,9 +1,10 @@
 // #include <openssl/x509.h>
 
 extern "C" {
-  #include <srtp/srtp.h>
-  #include <srtp/srtp_priv.h>
+  #include <srtp2/srtp.h>
 }
+#include <mutex>  // NOLINT
+#include <thread>  // NOLINT
 
 #include <boost/thread.hpp>
 #include <boost/lexical_cast.hpp>
@@ -32,13 +33,51 @@ using std::memcpy;
 
 const char* DtlsSocketContext::DefaultSrtpProfile = "SRTP_AES128_CM_SHA1_80";
 
-X509 *DtlsSocketContext::mCert = NULL;
-EVP_PKEY *DtlsSocketContext::privkey = NULL;
+X509 *DtlsSocketContext::mCert = nullptr;
+EVP_PKEY *DtlsSocketContext::privkey = nullptr;
 
 static const int KEY_LENGTH = 1024;
 
+static std::mutex* array_mutex;
+
 DEFINE_LOGGER(DtlsSocketContext, "dtls.DtlsSocketContext");
 log4cxx::LoggerPtr sslLogger(log4cxx::Logger::getLogger("dtls.SSL"));
+
+static void ssl_lock_callback(int mode, int type, const char* file, int line) {
+  if (mode & CRYPTO_LOCK) {
+    array_mutex[type].lock();
+  } else {
+    array_mutex[type].unlock();
+  }
+}
+
+static unsigned long ssl_thread_id() {  // NOLINT
+  return (unsigned long)std::hash<std::thread::id>()(std::this_thread::get_id());  // NOLINT
+}
+
+static int ssl_thread_setup() {
+  array_mutex = new std::mutex[CRYPTO_num_locks()];
+
+  if (!array_mutex) {
+    return 0;
+  } else {
+    CRYPTO_set_id_callback(ssl_thread_id);
+    CRYPTO_set_locking_callback(ssl_lock_callback);
+  }
+  return 1;
+}
+
+static int ssl_thread_cleanup() {
+  if (!array_mutex) {
+    return 0;
+  }
+
+  CRYPTO_set_id_callback(nullptr);
+  CRYPTO_set_locking_callback(nullptr);
+  delete[] array_mutex;
+  array_mutex = nullptr;
+  return 1;
+}
 
 void SSLInfoCallback(const SSL* s, int where, int ret) {
   const char* str = "undefined";
@@ -61,7 +100,7 @@ void SSLInfoCallback(const SSL* s, int where, int ret) {
     if (ret == 0) {
       ELOG_WARN2(sslLogger, "failed in %s", SSL_state_string_long(s));
     } else if (ret < 0) {
-      ELOG_WARN2(sslLogger, "error in %s", SSL_state_string_long(s));
+      ELOG_INFO2(sslLogger, "callback for %s", SSL_state_string_long(s));
     }
   }
 }
@@ -74,7 +113,7 @@ int SSLVerifyCallback(int ok, X509_STORE_CTX* store) {
     int err = X509_STORE_CTX_get_error(store);
     X509_NAME_oneline(X509_get_issuer_name(cert), data, sizeof(data));
     X509_NAME_oneline(X509_get_subject_name(cert), data2, sizeof(data2));
-    ELOG_DEBUG2(sslLogger, "Error with certificate at depth: %d, issuer: %s, subject: %s, err: %d : %s",
+    ELOG_DEBUG2(sslLogger, "Callback with certificate at depth: %d, issuer: %s, subject: %s, err: %d : %s",
     depth,
     data,
     data2,
@@ -95,8 +134,6 @@ int SSLVerifyCallback(int ok, X509_STORE_CTX* store) {
   if (!ok) {
     // X509* cert = X509_STORE_CTX_get_current_cert(store);
     int err = X509_STORE_CTX_get_error(store);
-
-    ELOG_DEBUG2(sslLogger, "Error: %d", X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT);
 
     // peer-to-peer mode: allow the certificate to be self-signed,
     // assuming it matches the digest that was specified.
@@ -217,11 +254,10 @@ int createCert(const std::string& pAor, int expireDays, int keyLen, X509*& outCe
   // is required
   DtlsSocketContext::DtlsSocketContext() {
     started = false;
-    DtlsSocketContext::Init();
 
     ELOG_DEBUG("Creating Dtls factory, Openssl v %s", OPENSSL_VERSION_TEXT);
 
-    mContext = SSL_CTX_new(DTLSv1_method());
+    mContext = SSL_CTX_new(DTLS_method());
     assert(mContext);
 
     int r = SSL_CTX_use_certificate(mContext, mCert);
@@ -237,32 +273,43 @@ int createCert(const std::string& pAor, int expireDays, int keyLen, X509*& outCe
     SSL_CTX_set_verify(mContext, SSL_VERIFY_PEER |SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
       SSLVerifyCallback);
 
+    SSL_CTX_set_options(mContext, SSL_OP_NO_QUERY_MTU);
       // SSL_CTX_set_session_cache_mode(mContext, SSL_SESS_CACHE_OFF);
       // SSL_CTX_set_options(mContext, SSL_OP_NO_TICKET);
       // Set SRTP profiles
-      r = SSL_CTX_set_tlsext_use_srtp(mContext, DefaultSrtpProfile);
-      assert(r == 0);
+    r = SSL_CTX_set_tlsext_use_srtp(mContext, DefaultSrtpProfile);
+    assert(r == 0);
 
-      SSL_CTX_set_verify_depth(mContext, 2);
-      SSL_CTX_set_read_ahead(mContext, 1);
+    SSL_CTX_set_verify_depth(mContext, 2);
+    SSL_CTX_set_read_ahead(mContext, 1);
 
-      ELOG_DEBUG("DtlsSocketContext created");
-    }
+    ELOG_DEBUG("DtlsSocketContext created");
+  }
 
     DtlsSocketContext::~DtlsSocketContext() {
+      mSocket->close();
       delete mSocket;
-      mSocket = NULL;
+      mSocket = nullptr;
       SSL_CTX_free(mContext);
     }
 
+    void DtlsSocketContext::close() {
+      mSocket->close();
+    }
 
     void DtlsSocketContext::Init() {
-      if (DtlsSocketContext::mCert == NULL) {
+      ssl_thread_setup();
+      if (DtlsSocketContext::mCert == nullptr) {
+        OpenSSL_add_all_algorithms();
         SSL_library_init();
         SSL_load_error_strings();
         ERR_load_crypto_strings();
         createCert("sip:licode@lynckia.com", 365, 1024, DtlsSocketContext::mCert, DtlsSocketContext::privkey);
       }
+    }
+
+    void DtlsSocketContext::Destroy() {
+      ssl_thread_cleanup();
     }
 
     DtlsSocket* DtlsSocketContext::createClient() {
@@ -306,10 +353,10 @@ int createCert(const std::string& pAor, int expireDays, int keyLen, X509*& outCe
     }
 
 
-    std::string DtlsSocketContext::getFingerprint() {
-      char fprint[100];
+    std::string DtlsSocketContext::getFingerprint() const {
+      char fprint[100] = {};
       mSocket->getMyCertFingerprint(fprint);
-      return std::string(fprint, strlen(fprint));
+      return std::string(fprint);
     }
 
     void DtlsSocketContext::start() {
@@ -329,6 +376,10 @@ int createCert(const std::string& pAor, int expireDays, int keyLen, X509*& outCe
       if (receiver != NULL) {
         receiver->onDtlsPacket(this, data, len);
       }
+    }
+
+    void DtlsSocketContext::handleTimeout() {
+      mSocket->handleTimeout();
     }
 
     void DtlsSocketContext::handshakeCompleted() {

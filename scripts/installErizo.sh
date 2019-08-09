@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
@@ -11,7 +11,14 @@ CURRENT_DIR=`pwd`
 LIB_DIR=$BUILD_DIR/libdeps
 PREFIX_DIR=$LIB_DIR/build/
 NVM_CHECK="$PATHNAME"/checkNvm.sh
+FAST_MAKE=''
 
+NUM_CORES=1;
+if [ "$(uname)" == "Darwin" ]; then
+  NUM_CORES=$(sysctl -n hw.ncpu);
+elif [ "$(expr substr $(uname -s) 1 5)" == "Linux" ]; then
+  NUM_CORES=$(grep -c ^processor /proc/cpuinfo);
+fi
 
 export ERIZO_HOME=$ROOT/erizo
 
@@ -31,6 +38,8 @@ OPTIONS:
    -e      Compile Erizo
    -a      Compile Erizo API
    -c      Install Erizo node modules
+   -d      Delete Erizo object files
+   -f      Use 4 threads to build
    -s      Install Spine
    -t      Run Tests
 EOF
@@ -50,8 +59,15 @@ check_result() {
 install_erizo(){
   echo 'Installing erizo...'
   cd $ROOT/erizo
+  cd utils/conan-include-paths
+  conan export . lynckia/includes
+  cd ../..
+  conan install . --build IncludePathsGenerator
   ./generateProject.sh
-  ./buildProject.sh
+  ./buildProject.sh $FAST_MAKE
+  if [ "$DELETE_OBJECT_FILES" == "true" ]; then
+    ./cleanObjectFiles.sh
+  fi
   check_result $?
   cd $CURRENT_DIR
 }
@@ -61,8 +77,8 @@ install_erizo_api(){
   cd $ROOT/erizoAPI
   . $NVM_CHECK
   nvm use
-  npm install nan@2.3.2
-  ./build.sh
+  npm install nan@2.13.1
+  $FAST_BUILD ./build.sh
   check_result $?
   cd $CURRENT_DIR
 }
@@ -99,7 +115,7 @@ then
   install_erizo_controller
   install_spine
 else
-  while getopts “heacst” OPTION
+  while getopts “heacstfd” OPTION
   do
     case $OPTION in
       h)
@@ -120,6 +136,14 @@ else
         ;;
       t)
         execute_tests
+        ;;
+      f)
+        FAST_MAKE="-j$NUM_CORES"
+        FAST_BUILD="env JOBS=$NUM_CORES"
+        echo "Compiling using $NUM_CORES threads"
+        ;;
+      d)
+        DELETE_OBJECT_FILES='true'
         ;;
       ?)
         usage

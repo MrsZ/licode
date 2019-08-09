@@ -10,70 +10,69 @@
 
 #include "./SrtpChannel.h"
 #include "rtp/RtpHeaders.h"
-#include "lib/LibNiceInterface.h"
+#include "./LibNiceConnection.h"
+#include "./NicerConnection.h"
 
-using erizo::Resender;
+using erizo::TimeoutChecker;
 using erizo::DtlsTransport;
-using erizo::packetPtr;
 using dtls::DtlsSocketContext;
 
 DEFINE_LOGGER(DtlsTransport, "DtlsTransport");
-DEFINE_LOGGER(Resender, "Resender");
+DEFINE_LOGGER(TimeoutChecker, "TimeoutChecker");
 
 using std::memcpy;
 
-Resender::Resender(DtlsTransport* transport, dtls::DtlsSocketContext* ctx)
+static std::mutex dtls_mutex;
+
+TimeoutChecker::TimeoutChecker(DtlsTransport* transport, dtls::DtlsSocketContext* ctx)
     : transport_(transport), socket_context_(ctx),
-      resend_seconds_(kInitialSecsPerResend), max_resends_(kMaxResends) {
+      check_seconds_(kInitialSecsPerTimeoutCheck), max_checks_(kMaxTimeoutChecks),
+      scheduled_task_{std::make_shared<ScheduledTaskReference>()} {
 }
 
-Resender::~Resender() {
-  ELOG_DEBUG("message: ~Resender");
+TimeoutChecker::~TimeoutChecker() {
   cancel();
 }
 
-void Resender::cancel() {
-  ELOG_DEBUG("message: cancelled");
+void TimeoutChecker::cancel() {
   transport_->getWorker()->unschedule(scheduled_task_);
 }
 
-void Resender::scheduleResend(packetPtr packet) {
-  ELOG_DEBUG("message: Scheduling a new resender");
+void TimeoutChecker::scheduleCheck() {
+  ELOG_TRACE("message: Scheduling a new TimeoutChecker");
   transport_->getWorker()->unschedule(scheduled_task_);
-  resend_seconds_ = kInitialSecsPerResend;
-  packet_ = packet;
-  transport_->writeDtlsPacket(socket_context_, packet_);
+  check_seconds_ = kInitialSecsPerTimeoutCheck;
   if (transport_->getTransportState() != TRANSPORT_READY) {
     scheduleNext();
   }
 }
 
-void Resender::resend() {
-  if (transport_ != nullptr) {
-    if (max_resends_-- > 0) {
-      ELOG_DEBUG("%s message: Resending DTLS message", transport_->toLog());
-      transport_->writeDtlsPacket(socket_context_, packet_);
-      scheduleNext();
-    } else {
-      ELOG_DEBUG("%s message: DTLS timeout", transport_->toLog());
-      transport_->onHandshakeFailed(socket_context_, "Dtls Timeout on Resender");
-    }
-  }
-}
-
-void Resender::scheduleNext() {
+void TimeoutChecker::scheduleNext() {
   scheduled_task_ = transport_->getWorker()->scheduleFromNow([this]() {
-    this->resend();
-  }, std::chrono::seconds(resend_seconds_));
-  resend_seconds_ = resend_seconds_ * 2;
+      if (transport_->getTransportState() == TRANSPORT_READY) {
+        return;
+      }
+      if (transport_ != nullptr) {
+        if (max_checks_-- > 0) {
+          ELOG_DEBUG("Handling dtls timeout, checks left: %d", max_checks_);
+          if (socket_context_) {
+            std::lock_guard<std::mutex> guard(dtls_mutex);
+            socket_context_->handleTimeout();
+          }
+          scheduleNext();
+        } else {
+          ELOG_DEBUG("%s message: DTLS timeout", transport_->toLog());
+          transport_->onHandshakeFailed(socket_context_, "Dtls Timeout on TimeoutChecker");
+        }
+      }
+  }, std::chrono::seconds(check_seconds_));
 }
 
 DtlsTransport::DtlsTransport(MediaType med, const std::string &transport_name, const std::string& connection_id,
-                            bool bundle, bool rtcp_mux, TransportListener *transportListener,
+                            bool bundle, bool rtcp_mux, std::weak_ptr<TransportListener> transport_listener,
                             const IceConfig& iceConfig, std::string username, std::string password,
-                            bool isServer, std::shared_ptr<Worker> worker):
-  Transport(med, transport_name, connection_id, bundle, rtcp_mux, transportListener, iceConfig, worker),
-  unprotect_packet_{std::make_shared<dataPacket>()},
+                            bool isServer, std::shared_ptr<Worker> worker, std::shared_ptr<IOWorker> io_worker):
+  Transport(med, transport_name, connection_id, bundle, rtcp_mux, transport_listener, iceConfig, worker, io_worker),
   readyRtp(false), readyRtcp(false), isServer_(isServer) {
     ELOG_DEBUG("%s message: constructor, transportName: %s, isBundle: %d", toLog(), transport_name.c_str(), bundle);
     dtlsRtp.reset(new DtlsSocketContext());
@@ -102,38 +101,61 @@ DtlsTransport::DtlsTransport(MediaType med, const std::string &transport_name, c
         dtlsRtcp->setDtlsReceiver(this);
       }
     }
-    nice_.reset(new NiceConnection(boost::shared_ptr<LibNiceInterface>(new LibNiceInterfaceImpl()), med,
-          transport_name, connection_id_, this, comps, iceConfig_, username, password));
-    rtp_resender_.reset(new Resender(this, dtlsRtp.get()));
+    iceConfig_.connection_id = connection_id_;
+    iceConfig_.transport_name = transport_name;
+    iceConfig_.media_type = med;
+    iceConfig_.ice_components = comps;
+    iceConfig_.username = username;
+    iceConfig_.password = password;
+    if (iceConfig_.use_nicer) {
+      ice_ = NicerConnection::create(io_worker_, iceConfig_);
+    } else {
+      ice_.reset(LibNiceConnection::create(iceConfig_));
+    }
+    rtp_timeout_checker_.reset(new TimeoutChecker(this, dtlsRtp.get()));
     if (!rtcp_mux) {
-      rtcp_resender_.reset(new Resender(this, dtlsRtcp.get()));
+      rtcp_timeout_checker_.reset(new TimeoutChecker(this, dtlsRtcp.get()));
     }
     ELOG_DEBUG("%s message: created", toLog());
   }
 
 DtlsTransport::~DtlsTransport() {
-  ELOG_DEBUG("%s message: destroying", toLog());
   if (this->state_ != TRANSPORT_FINISHED) {
     this->close();
   }
-  ELOG_DEBUG("%s message: destroyed", toLog());
 }
 
 void DtlsTransport::start() {
-  nice_->copyLogContextFrom(this);
+  ice_->setIceListener(shared_from_this());
+  ice_->copyLogContextFrom(*this);
   ELOG_DEBUG("%s message: starting ice", toLog());
-  nice_->start();
+  ice_->start();
 }
 
 void DtlsTransport::close() {
   ELOG_DEBUG("%s message: closing", toLog());
   running_ = false;
-  nice_->close();
+  if (rtp_timeout_checker_) {
+    rtp_timeout_checker_->cancel();
+  }
+  if (rtcp_timeout_checker_) {
+    rtcp_timeout_checker_->cancel();
+  }
+  ice_->close();
+  if (dtlsRtp) {
+    dtlsRtp->close();
+  }
+  if (dtlsRtcp) {
+    dtlsRtcp->close();
+  }
   this->state_ = TRANSPORT_FINISHED;
   ELOG_DEBUG("%s message: closed", toLog());
 }
 
-void DtlsTransport::onNiceData(packetPtr packet) {
+void DtlsTransport::onIceData(packetPtr packet) {
+  if (!running_) {
+    return;
+  }
   int len = packet->length;
   char *data = packet->data;
   unsigned int component_id = packet->comp;
@@ -144,33 +166,28 @@ void DtlsTransport::onNiceData(packetPtr packet) {
     ELOG_DEBUG("%s message: Received DTLS message, transportName: %s, componentId: %u",
                toLog(), transport_name.c_str(), component_id);
     if (component_id == 1) {
-      if (rtp_resender_.get() != NULL) {
-        rtp_resender_->cancel();
-      }
+      std::lock_guard<std::mutex> guard(dtls_mutex);
       dtlsRtp->read(reinterpret_cast<unsigned char*>(data), len);
     } else {
-      if (rtcp_resender_.get() != NULL) {
-        rtcp_resender_->cancel();
-      }
+      std::lock_guard<std::mutex> guard(dtls_mutex);
       dtlsRtcp->read(reinterpret_cast<unsigned char*>(data), len);
     }
     return;
   } else if (this->getTransportState() == TRANSPORT_READY) {
-    unprotect_packet_->length = len;
-    unprotect_packet_->received_time_ms = packet->received_time_ms;
-    memcpy(unprotect_packet_->data, data, len);
+    std::shared_ptr<DataPacket> unprotect_packet = std::make_shared<DataPacket>(component_id,
+      data, len, VIDEO_PACKET, packet->received_time_ms);
 
     if (dtlsRtcp != NULL && component_id == 2) {
       srtp = srtcp_.get();
     }
     if (srtp != NULL) {
-      RtcpHeader *chead = reinterpret_cast<RtcpHeader*>(unprotect_packet_->data);
+      RtcpHeader *chead = reinterpret_cast<RtcpHeader*>(unprotect_packet->data);
       if (chead->isRtcp()) {
-        if (srtp->unprotectRtcp(unprotect_packet_->data, &unprotect_packet_->length) < 0) {
+        if (srtp->unprotectRtcp(unprotect_packet->data, &unprotect_packet->length) < 0) {
           return;
         }
       } else {
-        if (srtp->unprotectRtp(unprotect_packet_->data, &unprotect_packet_->length) < 0) {
+        if (srtp->unprotectRtp(unprotect_packet->data, &unprotect_packet->length) < 0) {
           return;
         }
       }
@@ -181,16 +198,20 @@ void DtlsTransport::onNiceData(packetPtr packet) {
     if (length <= 0) {
       return;
     }
-    getTransportListener()->onTransportData(unprotect_packet_, this);
+    if (auto listener = getTransportListener().lock()) {
+      listener->onTransportData(unprotect_packet, this);
+    }
   }
 }
 
-void DtlsTransport::onCandidate(const CandidateInfo &candidate, NiceConnection *conn) {
-  getTransportListener()->onCandidate(candidate, this);
+void DtlsTransport::onCandidate(const CandidateInfo &candidate, IceConnection *conn) {
+  if (auto listener = getTransportListener().lock()) {
+    listener->onCandidate(candidate, this);
+  }
 }
 
 void DtlsTransport::write(char* data, int len) {
-  if (nice_ == nullptr || !running_) {
+  if (ice_ == nullptr || !running_) {
     return;
   }
   int length = len;
@@ -207,7 +228,7 @@ void DtlsTransport::write(char* data, int len) {
       if (dtlsRtcp != NULL) {
         srtp = srtcp_.get();
       }
-      if (srtp && nice_->checkIceState() == NICE_READY) {
+      if (srtp && ice_->checkIceState() == IceState::READY) {
         if (srtp->protectRtcp(protectBuf_, &length) < 0) {
           return;
         }
@@ -215,7 +236,7 @@ void DtlsTransport::write(char* data, int len) {
     } else {
       comp = 1;
 
-      if (srtp && nice_->checkIceState() == NICE_READY) {
+      if (srtp && ice_->checkIceState() == IceState::READY) {
         if (srtp->protectRtp(protectBuf_, &length) < 0) {
           return;
         }
@@ -224,8 +245,8 @@ void DtlsTransport::write(char* data, int len) {
     if (length <= 10) {
       return;
     }
-    if (nice_->checkIceState() == NICE_READY) {
-      writeOnNice(comp, protectBuf_, length);
+    if (ice_->checkIceState() == IceState::READY) {
+      writeOnIce(comp, protectBuf_, length);
     }
   }
 }
@@ -234,12 +255,12 @@ void DtlsTransport::onDtlsPacket(DtlsSocketContext *ctx, const unsigned char* da
   bool is_rtcp = ctx == dtlsRtcp.get();
   int component_id = is_rtcp ? 2 : 1;
 
-  packetPtr packet = std::make_shared<dataPacket>(component_id, data, len);
+  packetPtr packet = std::make_shared<DataPacket>(component_id, data, len);
 
   if (is_rtcp) {
-    rtcp_resender_->scheduleResend(packet);
+    writeDtlsPacket(dtlsRtcp.get(), packet);
   } else {
-    rtp_resender_->scheduleResend(packet);
+    writeDtlsPacket(dtlsRtp.get(), packet);
   }
 
   ELOG_DEBUG("%s message: Sending DTLS message, transportName: %s, componentId: %d",
@@ -250,13 +271,20 @@ void DtlsTransport::writeDtlsPacket(DtlsSocketContext *ctx, packetPtr packet) {
   char data[1500];
   unsigned int len = packet->length;
   memcpy(data, packet->data, len);
-  writeOnNice(packet->comp, data, len);
+  writeOnIce(packet->comp, data, len);
 }
 
 void DtlsTransport::onHandshakeCompleted(DtlsSocketContext *ctx, std::string clientKey, std::string serverKey,
                                          std::string srtp_profile) {
   boost::mutex::scoped_lock lock(sessionMutex_);
   std::string temp;
+
+  if (rtp_timeout_checker_) {
+    rtp_timeout_checker_->cancel();
+  }
+  if (rtcp_timeout_checker_) {
+    rtcp_timeout_checker_->cancel();
+  }
 
   if (isServer_) {  // If we are server, we swap the keys
     ELOG_DEBUG("%s message: swapping keys, isServer: %d", toLog(), isServer_);
@@ -288,36 +316,50 @@ void DtlsTransport::onHandshakeCompleted(DtlsSocketContext *ctx, std::string cli
   }
 }
 
-void DtlsTransport::onHandshakeFailed(DtlsSocketContext *ctx, const std::string error) {
+void DtlsTransport::onHandshakeFailed(DtlsSocketContext *ctx, const std::string& error) {
   ELOG_WARN("%s message: Handshake failed, transportName:%s, openSSLerror: %s",
             toLog(), transport_name.c_str(), error.c_str());
   running_ = false;
   updateTransportState(TRANSPORT_FAILED);
 }
 
-std::string DtlsTransport::getMyFingerprint() {
+std::string DtlsTransport::getMyFingerprint() const {
   return dtlsRtp->getFingerprint();
 }
 
-void DtlsTransport::updateIceState(IceState state, NiceConnection *conn) {
-  ELOG_DEBUG("%s message:NiceState, transportName: %s, state: %d, isBundle: %d",
+void DtlsTransport::updateIceState(IceState state, IceConnection *conn) {
+  std::weak_ptr<Transport> weak_transport = Transport::shared_from_this();
+  worker_->task([weak_transport, state, conn, this]() {
+    if (auto transport = weak_transport.lock()) {
+      updateIceStateSync(state, conn);
+    }
+  });
+}
+
+void DtlsTransport::updateIceStateSync(IceState state, IceConnection *conn) {
+  if (!running_) {
+    return;
+  }
+  ELOG_DEBUG("%s message:IceState, transportName: %s, state: %d, isBundle: %d",
              toLog(), transport_name.c_str(), state, bundle_);
-  if (state == NICE_INITIAL && this->getTransportState() != TRANSPORT_STARTED) {
+  if (state == IceState::INITIAL && this->getTransportState() != TRANSPORT_STARTED) {
     updateTransportState(TRANSPORT_STARTED);
-  } else if (state == NICE_CANDIDATES_RECEIVED && this->getTransportState() != TRANSPORT_GATHERED) {
+  } else if (state == IceState::CANDIDATES_RECEIVED && this->getTransportState() != TRANSPORT_GATHERED) {
     updateTransportState(TRANSPORT_GATHERED);
-  } else if (state == NICE_FAILED) {
-    ELOG_DEBUG("%s message: Nice Failed", toLog());
+  } else if (state == IceState::FAILED) {
+    ELOG_DEBUG("%s message: Ice Failed", toLog());
     running_ = false;
     updateTransportState(TRANSPORT_FAILED);
-  } else if (state == NICE_READY) {
+  } else if (state == IceState::READY) {
     if (!isServer_ && dtlsRtp && !dtlsRtp->started) {
       ELOG_INFO("%s message: DTLSRTP Start, transportName: %s", toLog(), transport_name.c_str());
       dtlsRtp->start();
+      rtp_timeout_checker_->scheduleCheck();
     }
     if (!isServer_ && dtlsRtcp != NULL && !dtlsRtcp->started) {
       ELOG_DEBUG("%s message: DTLSRTCP Start, transportName: %s", toLog(), transport_name.c_str());
       dtlsRtcp->start();
+      rtcp_timeout_checker_->scheduleCheck();
     }
   }
 }
@@ -326,8 +368,8 @@ void DtlsTransport::processLocalSdp(SdpInfo *localSdp_) {
   ELOG_DEBUG("%s message: processing local sdp, transportName: %s", toLog(), transport_name.c_str());
   localSdp_->isFingerprint = true;
   localSdp_->fingerprint = getMyFingerprint();
-  std::string username = nice_->getLocalUsername();
-  std::string password = nice_->getLocalPassword();
+  std::string username(ice_->getLocalUsername());
+  std::string password(ice_->getLocalPassword());
   if (bundle_) {
     localSdp_->setCredentials(username, password, VIDEO_TYPE);
     localSdp_->setCredentials(username, password, AUDIO_TYPE);
