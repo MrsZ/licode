@@ -23,12 +23,14 @@ config.cloudProvider.name = '';
  NUVE CONFIGURATION
 **********************************************************/
 config.nuve = {};
-config.nuve.dataBaseURL = "localhost/nuvedb"; // default value: 'localhost/nuvedb'
+config.nuve.dataBaseURL = "mongodb://localhost/nuvedb"; // default value: "mongodb://localhost/nuvedb"
+config.nuve.dataBaseName = 'nuvedb'; // default value: 'nuvedb'
 config.nuve.superserviceID = '_auto_generated_ID_'; // default value: ''
 config.nuve.superserviceKey = '_auto_generated_KEY_'; // default value: ''
 config.nuve.testErizoController = 'localhost:8080'; // default value: 'localhost:8080'
 // Nuve Cloud Handler policies are in nuve/nuveAPI/ch_policies/ folder
 config.nuve.cloudHandlerPolicy = 'default_policy.js'; // default value: 'default_policy.js'
+config.nuve.port = 3000; // default value: 3000
 
 
 /*********************************************************
@@ -51,13 +53,14 @@ config.erizoController = {};
 // }
 config.erizoController.iceServers = [{'url': 'stun:stun.l.google.com:19302'}]; // default value: [{'url': 'stun:stun.l.google.com:19302'}]
 
-// Default and max video bandwidth parameters to be used by clients
+// Default and max video bandwidth parameters to be used by clients for both published and subscribed streams
 config.erizoController.defaultVideoBW = 300; //default value: 300
 config.erizoController.maxVideoBW = 300; //default value: 300
 
 // Public erizoController IP for websockets (useful when behind NATs)
 // Use '' to automatically get IP from the interface
 config.erizoController.publicIP = ''; //default value: ''
+config.erizoController.networkinterface = ''; //default value: ''
 
 // This configuration is used by the clients to reach erizoController
 // Use '' to use the public IP address instead of a hostname
@@ -79,13 +82,17 @@ config.erizoController.listen_port = 8080; //default value: 8080
 // Use the name of the inferface you want to bind to for websockets
 // config.erizoController.networkInterface = 'eth1' // default value: undefined
 
+config.erizoController.exitOnNuveCheckFail = false;  // default value: false
+config.erizoController.allowSinglePC = false;  // default value: false
+config.erizoController.maxErizosUsedByRoom = 100;  // default value: 100
+
 config.erizoController.warning_n_rooms = 15; // default value: 15
 config.erizoController.limit_n_rooms = 20; // default value: 20
 config.erizoController.interval_time_keepAlive = 1000; // default value: 1000
 
 // Roles to be used by services
 config.erizoController.roles =
-{"presenter": {"publish": true, "subscribe": true, "record": true},
+{"presenter": {"publish": true, "subscribe": true, "record": true, "stats": true, "controlhandlers": true},
     "viewer": {"subscribe": true},
     "viewerWithData": {"subscribe": true, "publish": {"audio": false, "video": false, "screen": false, "data": true}}}; // default value: {"presenter":{"publish": true, "subscribe":true, "record":true}, "viewer":{"subscribe":true}, "viewerWithData":{"subscribe":true, "publish":{"audio":false,"video":false,"screen":false,"data":true}}}
 
@@ -94,6 +101,13 @@ config.erizoController.report = {
     session_events: false, 		// Session level events -- default value: false
     connection_events: false, 	// Connection (ICE) level events -- default value: false
     rtcp_stats: false				// RTCP stats -- default value: false
+};
+
+// Subscriptions to rtcp_stats via AMQP
+config.erizoController.reportSubscriptions = {
+	maxSubscriptions: 10,	// per ErizoJS -- set 0 to disable subscriptions -- default 10
+	minInterval: 1, 		// in seconds -- default 1
+	maxTimeout: 60			// in seconds -- default 60
 };
 
 // If undefined, the path will be /tmp/
@@ -115,6 +129,7 @@ config.erizoAgent.prerunProcesses = 1; // default value: 1
 // Public erizoAgent IP for ICE candidates (useful when behind NATs)
 // Use '' to automatically get IP from the interface
 config.erizoAgent.publicIP = ''; //default value: ''
+config.erizoAgent.networkinterface = ''; //default value: ''
 
 // Use the name of the inferface you want to bind for ICE candidates
 // config.erizoAgent.networkInterface = 'eth1' // default value: undefined
@@ -122,6 +137,12 @@ config.erizoAgent.publicIP = ''; //default value: ''
 //Use individual log files for each of the started erizoJS processes
 //This files will be named erizo-ERIZO_ID_HASH.log
 config.erizoAgent.useIndividualLogFiles = false;
+
+// If true this Agent will launch Debug versions of ErizoJS
+config.erizoAgent.launchDebugErizoJS = false;
+
+// If true this Agent will log also nICEr logs
+config.erizoAgent.enableNicerLogs = true; // default value: true
 
 // Custom log directory for agent instance log files.
 // If useIndividualLogFiles is enabled, files will go here
@@ -140,6 +161,16 @@ config.erizo = {};
 // Number of workers that will be used to handle WebRtcConnections
 config.erizo.numWorkers = 24;
 
+// Number of workers what will be used for IO (including ICE logic)
+config.erizo.numIOWorkers = 1;
+
+// the max amount of time in days a process is allowed to be up after the first publisher is added
+config.erizo.activeUptimeLimit = 7;
+// the max time in hours since last publish or subscribe operation where a erizoJS process can be killed
+config.erizo.maxTimeSinceLastOperation = 3;
+// Interval to check uptime in seconds
+config.erizo.checkUptimeInterval = 1800;
+
 //STUN server IP address and port to be used by the server.
 //if '' is used, the address is discovered locally
 //Please note this is only needed if your server does not have a public IP
@@ -154,10 +185,38 @@ config.erizo.turnserver = ''; // default value: ''
 config.erizo.turnport = 0; // default value: 0
 config.erizo.turnusername = '';
 config.erizo.turnpass = '';
+config.erizo.networkinterface = ''; //default value: ''
 
 //note, this won't work with all versions of libnice. With 0 all the available ports are used
 config.erizo.minport = 0; // default value: 0
 config.erizo.maxport = 0; // default value: 0
+
+config.erizo.useConnectionQualityCheck = true; // default value: false
+
+config.erizo.disabledHandlers = []; // there are no handlers disabled by default
+
+config.erizo.handlerProfiles = [[], [{"name":"Logger"}]]; //Default handler profile, default value [], format {"handlerName":"name",param1:"value1","param2":"value2",...}
+
+/*********************************************************
+ ROV CONFIGURATION
+**********************************************************/
+config.rov = {};
+// The stats gathering period in ms
+config.rov.statsPeriod = 20000;
+// The port to expose the stats to prometheus
+config.rov.serverPort = 3005;
+// A prefix for the prometheus stats
+config.rov.statsPrefix = "licode_";
+
+/*********************************************************
+ BASIC EXAMPLE CONFIGURATION
+**********************************************************/
+config.basicExample = {};
+config.basicExample.port = 3001;  // default value: 3001
+config.basicExample.tlsPort = 3004; // default value: 3004
+config.basicExample.nuveUrl = 'http://localhost:3000/';
+config.basicExample.logger = {};
+config.basicExample.logger.configFile = './log4js_configuration.json'; // default value: "./log4js_configuration.json"
 
 /***** END *****/
 // Following lines are always needed.

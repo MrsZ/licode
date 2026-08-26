@@ -10,12 +10,9 @@
 
 #include "./WebRtcConnection.h"
 
-using std::memcpy;
-
 namespace erizo {
 DEFINE_LOGGER(ExternalInput, "media.ExternalInput");
 ExternalInput::ExternalInput(const std::string& inputUrl):url_(inputUrl) {
-  sourcefbSink_ = NULL;
   context_ = NULL;
   running_ = false;
   needTranscoding_ = false;
@@ -62,7 +59,8 @@ int ExternalInput::init() {
 
   // VideoCodecInfo info;
   MediaInfo om;
-  AVStream *st, *audio_st;
+  AVStream *st = nullptr;
+  AVStream *audio_st = nullptr;
 
   int streamNo = av_find_best_stream(context_, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
   if (streamNo < 0) {
@@ -111,16 +109,19 @@ int ExternalInput::init() {
     decodedBuffer_.reset((unsigned char*) malloc(100000));
     MediaInfo om;
     om.processorType = PACKAGE_ONLY;
-    if (audio_st->codec->codec_id == AV_CODEC_ID_PCM_MULAW) {
-      ELOG_DEBUG("PCM U8");
-      om.audioCodec.sampleRate = 8000;
-      om.audioCodec.codec = AUDIO_CODEC_PCM_U8;
-      om.rtpAudioInfo.PT = PCMU_8000_PT;
-    } else if (audio_st->codec->codec_id == AV_CODEC_ID_OPUS) {
-      ELOG_DEBUG("OPUS");
-      om.audioCodec.sampleRate = 48000;
-      om.audioCodec.codec = AUDIO_CODEC_OPUS;
-      om.rtpAudioInfo.PT = OPUS_48000_PT;
+    om.rtpVideoInfo.PT = VP8_90000_PT;
+    if (audio_st) {
+      if (audio_st->codec->codec_id == AV_CODEC_ID_PCM_MULAW) {
+        ELOG_DEBUG("PCM U8");
+        om.audioCodec.sampleRate = 8000;
+        om.audioCodec.codec = AUDIO_CODEC_PCM_U8;
+        om.rtpAudioInfo.PT = PCMU_8000_PT;
+      } else if (audio_st->codec->codec_id == AV_CODEC_ID_OPUS) {
+        ELOG_DEBUG("OPUS");
+        om.audioCodec.sampleRate = 48000;
+        om.audioCodec.codec = AUDIO_CODEC_OPUS;
+        om.rtpAudioInfo.PT = OPUS_48000_PT;
+      }
     }
     op_.reset(new OutputProcessor());
     op_->init(om, this);
@@ -128,15 +129,16 @@ int ExternalInput::init() {
     needTranscoding_ = true;
     inCodec_.initDecoder(st->codec);
 
-    bufflen_ = st->codec->width*st->codec->height*3/2;
+    bufflen_ = st->codec->width * st->codec->height * 3 / 2;
     decodedBuffer_.reset((unsigned char*) malloc(bufflen_));
 
 
     om.processorType = RTP_ONLY;
     om.videoCodec.codec = VIDEO_CODEC_VP8;
+    om.rtpVideoInfo.PT = VP8_90000_PT;
     om.videoCodec.bitRate = 1000000;
-    om.videoCodec.width = 640;
-    om.videoCodec.height = 480;
+    om.videoCodec.width = st->codec->width;
+    om.videoCodec.height = st->codec->height;
     om.videoCodec.frameRate = 20;
     om.hasVideo = true;
 
@@ -161,14 +163,74 @@ int ExternalInput::init() {
 }
 
 int ExternalInput::sendPLI() {
+  if (op_) {
+    op_->requestKeyframe();
+  }
   return 0;
 }
 
+int ExternalInput::deliverFeedback_(std::shared_ptr<DataPacket> fb_packet) {
+  RtcpHeader *chead = reinterpret_cast<RtcpHeader*>(fb_packet->data);
+  if (chead->isFeedback()) {
+    if (chead->getBlockCount() == 0 && (chead->getLength()+1) * 4  == fb_packet->length) {
+      return 0;
+    }
+    char* moving_buf = fb_packet->data;
+    int rtcp_length = 0;
+    int total_length = 0;
+    do {
+      moving_buf += rtcp_length;
+      chead = reinterpret_cast<RtcpHeader*>(moving_buf);
+      rtcp_length = (ntohs(chead->length) + 1) * 4;
+      total_length += rtcp_length;
+      switch (chead->packettype) {
+        case RTCP_RTP_Feedback_PT:
+          // NACKs are already handled by MediaStream from the subscribers
+          // sendPLI();
+          break;
+        case RTCP_PS_Feedback_PT:
+          switch (chead->getBlockCount()) {
+            case RTCP_PLI_FMT:
+            case RTCP_FIR_FMT:
+              sendPLI();
+              break;
+            case RTCP_AFB:
+              char *unique_id = reinterpret_cast<char*>(&chead->report.rembPacket.uniqueid);
+              if (!strncmp(unique_id, "REMB", 4)) {
+                uint64_t bitrate = chead->getBrMantis() << chead->getBrExp();
+                if (op_) {
+                  op_->setTargetBitrate(bitrate);
+                }
+              }
+              break;
+          }
+      }
+    } while (total_length < fb_packet->length);
+  }
+  return 0;
+}
 
-void ExternalInput::receiveRtpData(unsigned char*rtpdata, int len) {
-  if (videoSink_ != NULL) {
-    memcpy(sendVideoBuffer_, rtpdata, len);
-    videoSink_->deliverVideoData(sendVideoBuffer_, len);
+void ExternalInput::receiveRtpData(unsigned char* rtpdata, int len) {
+  if (auto video_sink = video_sink_.lock()) {
+    RtcpHeader* head = reinterpret_cast<RtcpHeader*>(rtpdata);
+    if (!head->isRtcp()) {
+      if (getVideoSourceSSRC() == 0) {
+        setVideoSourceSSRC(55543);
+      }
+    }
+    std::shared_ptr<DataPacket> packet = std::make_shared<DataPacket>(0, reinterpret_cast<char*>(rtpdata),
+        len, VIDEO_PACKET);
+    RtpHeader *rtp_header = reinterpret_cast<RtpHeader*>(packet->data);
+    unsigned char* start_buffer = reinterpret_cast<unsigned char*> (packet->data);
+    start_buffer = start_buffer + rtp_header->getHeaderLength();
+    RTPPayloadVP8* payload = vp8_parser_.parseVP8(
+      start_buffer, packet->length - rtp_header->getHeaderLength());
+    if (!payload->frameType) {
+      packet->is_keyframe = true;
+    } else {
+      packet->is_keyframe = false;
+    }
+    video_sink->deliverVideoData(packet);
   }
 }
 
@@ -214,7 +276,11 @@ void ExternalInput::receiveLoop() {
         lastAudioPts_ = avpacket_.pts;
         length = op_->packageAudio(avpacket_.data, avpacket_.size, decodedBuffer_.get(), avpacket_.pts);
         if (length > 0) {
-          audioSink_->deliverAudioData(reinterpret_cast<char*>(decodedBuffer_.get()), length);
+          std::shared_ptr<DataPacket> packet = std::make_shared<DataPacket>(0,
+              reinterpret_cast<char*>(decodedBuffer_.get()), length, AUDIO_PACKET);
+          if (auto audio_sink = audio_sink_.lock()) {
+            audio_sink->deliverAudioData(packet);
+          }
         }
       }
     }

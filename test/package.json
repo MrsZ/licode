@@ -1,9 +1,14 @@
 {
-  "name" : "erizo-tests",
+  "name": "erizo-tests",
   "version": "0.0.1",
   "private": true,
   "dependencies": {
-    "node-getopt":"0.2.3",
-    "chai":"3.5.0"
+    "aws-sdk": "^2.1406.0",
+    "axios": "^1.18.0",
+    "chai": "^3.5.0",
+    "cli-progress": "^3.8.2",
+    "node-getopt": "0.2.3",
+    "node-ssh": "^13.2.1",
+    "puppeteer-core": "^25.4.0"
   }
 }

@@ -70,10 +70,11 @@ int InputProcessor::init(const MediaInfo& info, RawDataReceiver* receiver) {
   return 0;
 }
 
-int InputProcessor::deliverAudioData_(char* buf, int len) {
+int InputProcessor::deliverAudioData_(std::shared_ptr<DataPacket> audio_packet) {
   if (audioDecoder && audioUnpackager) {
+    std::shared_ptr<DataPacket> copied_packet = std::make_shared<DataPacket>(*audio_packet);
     ELOG_DEBUG("Decoding audio");
-    int unp = unpackageAudio((unsigned char*) buf, len,
+    int unp = unpackageAudio((unsigned char*) copied_packet->data, copied_packet->length,
         unpackagedAudioBuffer_);
     int a = decodeAudio(unpackagedAudioBuffer_, unp, decodedAudioBuffer_);
     ELOG_DEBUG("DECODED AUDIO a %d", a);
@@ -86,9 +87,11 @@ int InputProcessor::deliverAudioData_(char* buf, int len) {
   }
   return 0;
 }
-int InputProcessor::deliverVideoData_(char* buf, int len) {
+int InputProcessor::deliverVideoData_(std::shared_ptr<DataPacket> video_packet) {
   if (videoUnpackager && videoDecoder) {
-    int ret = unpackageVideo(reinterpret_cast<unsigned char*>(buf), len, unpackagedBufferPtr_, &gotUnpackagedFrame_);
+    std::shared_ptr<DataPacket> copied_packet = std::make_shared<DataPacket>(*video_packet);
+    int ret = unpackageVideo(reinterpret_cast<unsigned char*>(copied_packet->data), copied_packet->length,
+        unpackagedBufferPtr_, &gotUnpackagedFrame_);
     if (ret < 0)
       return 0;
     upackagedSize_ += ret;
@@ -108,7 +111,6 @@ int InputProcessor::deliverVideoData_(char* buf, int len) {
       gotUnpackagedFrame_ = 0;
       ELOG_DEBUG("Bytes dec = %d", c);
       if (gotDecodedFrame && c > 0) {
-        ELOG_DEBUG("Tengo un frame decodificado!!");
         gotDecodedFrame = 0;
         RawDataPacket p;
         p.data = decodedBuffer_;
@@ -120,6 +122,10 @@ int InputProcessor::deliverVideoData_(char* buf, int len) {
       return c;
     }
   }
+  return 0;
+}
+
+int InputProcessor::deliverEvent_(MediaEventPtr event) {
   return 0;
 }
 
@@ -166,7 +172,7 @@ int InputProcessor::decodeAudio(unsigned char* inBuff, int inBuffLen, unsigned c
   }
 
   AVPacket avpkt;
-  int outSize;
+  int outSize = 0;
   int decSize = 0;
   int len = -1;
   uint8_t *decBuff = reinterpret_cast<uint8_t*>(malloc(16000));
@@ -286,7 +292,7 @@ void InputProcessor::closeSink() {
   this->close();
 }
 
-void InputProcessor::close() {
+boost::future<void> InputProcessor::close() {
   if (audioDecoder == 1) {
     avcodec_close(aDecoderContext);
     av_free(aDecoderContext);
@@ -301,6 +307,9 @@ void InputProcessor::close() {
   free(unpackagedBuffer_); unpackagedBuffer_ = NULL;
   free(unpackagedAudioBuffer_); unpackagedAudioBuffer_ = NULL;
   free(decodedAudioBuffer_); decodedAudioBuffer_ = NULL;
+  std::shared_ptr<boost::promise<void>> p = std::make_shared<boost::promise<void>>();
+  p->set_value();
+  return p->get_future();
 }
 
 OutputProcessor::OutputProcessor() {
@@ -377,6 +386,13 @@ void OutputProcessor::close() {
   free(packagedAudioBuffer_); packagedAudioBuffer_ = NULL;
 }
 
+void OutputProcessor::requestKeyframe() {
+  vCoder.requestKeyframe();
+}
+
+void OutputProcessor::setTargetBitrate(uint64_t bitrate) {
+  vCoder.setTargetBitrate(bitrate);
+}
 
 void OutputProcessor::receiveRawData(const RawDataPacket& packet) {
   if (packet.type == VIDEO) {
@@ -467,14 +483,14 @@ int OutputProcessor::packageAudio(unsigned char* inBuff, int inBuffLen, unsigned
 int OutputProcessor::packageVideo(unsigned char* inBuff, int buffSize, unsigned char* outBuff,
                                   long int pts) {  // NOLINT
   if (videoPackager == 0) {
-    ELOG_DEBUG("No se ha inicailizado el codec de output vídeo RTP");
+    ELOG_DEBUG("No se ha inicializado el codec de output vídeo RTP");
     return -1;
   }
 
   if (buffSize <= 0) {
     return -1;
   }
-  RtpVP8Fragmenter frag(inBuff, buffSize, 1100);
+  RtpVP8Fragmenter frag(inBuff, buffSize);
   bool lastFrame = false;
   unsigned int outlen = 0;
   uint64_t millis = ClockUtils::timePointToMs(clock::now());
@@ -493,7 +509,7 @@ int OutputProcessor::packageVideo(unsigned char* inBuff, int buffSize, unsigned 
         rtpHeader.setTimestamp(av_rescale(pts, 90000, 1000));
     }
     rtpHeader.setSSRC(55543);
-    rtpHeader.setPayloadType(100);
+    rtpHeader.setPayloadType(mediaInfo.rtpVideoInfo.PT);
     memcpy(rtpBuffer_, &rtpHeader, rtpHeader.getHeaderLength());
     memcpy(&rtpBuffer_[rtpHeader.getHeaderLength()], outBuff, outlen);
 

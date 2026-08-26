@@ -29,6 +29,7 @@ enum ProcessorType {
   RTP_ONLY, AVF, PACKAGE_ONLY
 };
 
+
 enum DataType {
   VIDEO, AUDIO
 };
@@ -89,7 +90,7 @@ class InputProcessor: public MediaSink {
   int unpackageAudio(unsigned char* inBuff, int inBuffLen, unsigned char* outBuff);
 
   void closeSink();
-  void close();
+  boost::future<void> close() override;
 
  private:
   int audioDecoder;
@@ -115,15 +116,7 @@ class InputProcessor: public MediaSink {
   AVCodec* aDecoder;
   AVCodecContext* aDecoderContext;
 
-
-  AVFormatContext* aInputFormatContext;
-  AVInputFormat* aInputFormat;
   VideoDecoder vDecoder;
-
-  RTPInfo* vRTPInfo;
-
-  AVFormatContext* vInputFormatContext;
-  AVInputFormat* vInputFormat;
 
   RawDataReceiver* rawReceiver_;
 
@@ -133,11 +126,13 @@ class InputProcessor: public MediaSink {
 
   bool initAudioUnpackager();
   bool initVideoUnpackager();
-  int deliverAudioData_(char* buf, int len);
-  int deliverVideoData_(char* buf, int len);
+  int deliverAudioData_(std::shared_ptr<DataPacket> audio_packet) override;
+  int deliverVideoData_(std::shared_ptr<DataPacket> video_packet) override;
+  int deliverEvent_(MediaEventPtr event) override;
 
   int decodeAudio(unsigned char* inBuff, int inBuffLen, unsigned char* outBuff);
 };
+
 class OutputProcessor: public RawDataReceiver {
   DECLARE_LOGGER();
 
@@ -147,6 +142,10 @@ class OutputProcessor: public RawDataReceiver {
   int init(const MediaInfo& info, RTPDataReceiver* rtpReceiver);
   void close();
   void receiveRawData(const RawDataPacket& packet);
+
+  void requestKeyframe();
+
+  void setTargetBitrate(uint64_t bitrate);
 
   int packageAudio(unsigned char* inBuff, int inBuffLen, unsigned char* outBuff, long int pts = 0);  // NOLINT
 
@@ -179,15 +178,6 @@ class OutputProcessor: public RawDataReceiver {
   AVCodecContext* aCoderContext;
 
   VideoEncoder vCoder;
-
-  AVFormatContext* aOutputFormatContext;
-  AVOutputFormat* aOutputFormat;
-
-  RTPInfo* vRTPInfo_;
-  RTPSink* sink_;
-
-  AVFormatContext* vOutputFormatContext;
-  AVOutputFormat* vOutputFormat;
 
   RtpVP8Parser pars;
 

@@ -17,10 +17,14 @@ namespace erizo {
 
 class LibNiceInterface {
  public:
-  virtual NiceAgent* NiceAgentNew(GMainContext* context) = 0;
+  virtual NiceAgent* NiceAgentNew(GMainContext* context, bool enable_ice_lite) = 0;
+  virtual ~LibNiceInterface() {}
+  virtual char* NiceInterfacesGetIpForInterface(const char *interface_name) = 0;
   virtual int NiceAgentAddStream(NiceAgent* agent, unsigned int n_components) = 0;
   virtual bool NiceAgentGetLocalCredentials(NiceAgent* agent, unsigned int stream_id,
       char** ufrag, char** pass) = 0;
+  virtual bool NiceAgentAddLocalAddress(NiceAgent* agent, const char *ip) = 0;
+  virtual bool NiceAgentRestart(NiceAgent* agent) = 0;
   virtual void NiceAgentSetPortRange(NiceAgent* agent, unsigned int stream_id,
       unsigned int component_id, unsigned int min_port, unsigned int max_port) = 0;
   virtual bool NiceAgentGetSelectedPair(NiceAgent* agent, unsigned int stream_id,
@@ -42,10 +46,13 @@ class LibNiceInterface {
 
 class LibNiceInterfaceImpl: public LibNiceInterface {
  public:
-  NiceAgent* NiceAgentNew(GMainContext* context);
+  NiceAgent* NiceAgentNew(GMainContext* context, bool enable_ice_lite);
   int NiceAgentAddStream(NiceAgent* agent, unsigned int n_components);
+  char* NiceInterfacesGetIpForInterface(const char *interface_name);
   bool NiceAgentGetLocalCredentials(NiceAgent* agent, unsigned int stream_id,
       char** ufrag, char** pass);
+  bool NiceAgentAddLocalAddress(NiceAgent* agent, const char *ip);
+  bool NiceAgentRestart(NiceAgent *agent);
   void NiceAgentSetPortRange(NiceAgent* agent, unsigned int stream_id,
       unsigned int component_id, unsigned int min_port, unsigned int max_port);
   bool NiceAgentGetSelectedPair(NiceAgent* agent, unsigned int stream_id,
@@ -66,4 +73,3 @@ class LibNiceInterfaceImpl: public LibNiceInterface {
 
 }  // namespace erizo
 #endif  // ERIZO_SRC_ERIZO_LIB_LIBNICEINTERFACE_H_
-

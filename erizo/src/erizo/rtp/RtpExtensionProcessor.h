@@ -13,36 +13,60 @@
 namespace erizo {
 
 enum RTPExtensions {
-  UNKNOWN = 0,
+  UNKNOWN = 0,          // usually padding
   SSRC_AUDIO_LEVEL,     // urn:ietf:params:rtp-hdrext:ssrc-audio-level
   ABS_SEND_TIME,        // http:// www.webrtc.org/experiments/rtp-hdrext/abs-send-time
   TOFFSET,              // urn:ietf:params:rtp-hdrext:toffset
   VIDEO_ORIENTATION,    // urn:3gpp:video-orientation
-  PLAYBACK_TIME         //  http:// www.webrtc.org/experiments/rtp-hdrext/playout-delay
+  TRANSPORT_CC,         // http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01
+  PLAYBACK_TIME,        // http:// www.webrtc.org/experiments/rtp-hdrext/playout-delay
+  RTP_ID,               // urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id
+  MID                   // urn:ietf:params:rtp-hdrext:sdes:mid
 };
 
 class RtpExtensionProcessor{
   DECLARE_LOGGER();
 
  public:
-  RtpExtensionProcessor();
+  explicit RtpExtensionProcessor(const std::vector<erizo::ExtMap> ext_mappings);
   virtual ~RtpExtensionProcessor();
 
-  void setSdpInfo(const SdpInfo& theInfo);
-  uint32_t processRtpExtensions(std::shared_ptr<dataPacket> p);
+  void setSdpInfo(std::shared_ptr<SdpInfo> theInfo);
+  uint32_t processRtpExtensions(std::shared_ptr<DataPacket> p);
+  uint32_t removeMidAndRidExtensions(std::shared_ptr<DataPacket> p);
+  VideoRotation getVideoRotation();
+  std::string getRid();
+  std::string getMid();
 
-  std::array<RTPExtensions, 10> getVideoExtensionMap() {
+  // extensions id range see https://tools.ietf.org/html/rfc5285#section-4.2
+  std::array<RTPExtensions, 15> getVideoExtensionMap() {
     return ext_map_video_;
   }
-  std::array<RTPExtensions, 10> getAudioExtensionMap() {
+  std::array<RTPExtensions, 15> getAudioExtensionMap() {
     return ext_map_audio_;
   }
+  std::vector<ExtMap> getSupportedExtensionMap() {
+    return ext_mappings_;
+  }
+  bool isValidExtension(std::string uri);
+  void setExtension(MediaType type, uint16_t internal_value, uint16_t value);
 
  private:
-  std::array<RTPExtensions, 10> ext_map_video_, ext_map_audio_;
+  std::vector<ExtMap> ext_mappings_;
+  std::array<RTPExtensions, 15> ext_map_video_, ext_map_audio_;
   std::map<std::string, uint8_t> translationMap_;
+  VideoRotation video_orientation_;
+  std::string mid_;
+  std::string rid_;
+  uint16_t external_transportcc_id_video_;
+
   uint32_t processAbsSendTime(char* buf);
+  uint32_t processVideoOrientation(char* buf);
+  uint32_t processRid(char* buf);
+  uint32_t processMid(char* buf);
   uint32_t stripExtension(char* buf, int len);
+  uint32_t addTransportCc(std::shared_ptr<DataPacket> p);
+  uint32_t processTransportCc(char* buf, uint16_t new_seq_num);
 };
 
 }  // namespace erizo

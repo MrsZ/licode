@@ -35,6 +35,10 @@ class ThreadPool : public Nan::ObjectWrap {
      */
     static NAN_METHOD(start);
 
+    static NAN_METHOD(getDurationDistribution);
+    static NAN_METHOD(getDelayDistribution);
+    static NAN_METHOD(resetStats);
+
     static Nan::Persistent<v8::Function> constructor;
 };
 

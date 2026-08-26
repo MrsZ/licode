@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
@@ -21,5 +21,5 @@ cp -r ${ROOT}/erizo_controller/erizoClient/dist/assets public/
 
 
 nvm use
-npm install --loglevel error express body-parser morgan errorhandler
+npm install --loglevel error
 cd $CURRENT_DIR

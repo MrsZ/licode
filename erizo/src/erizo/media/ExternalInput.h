@@ -4,12 +4,17 @@
 #include <boost/scoped_ptr.hpp>
 #include <boost/thread.hpp>
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/time.h>
 }
+
+#pragma GCC diagnostic pop
 
 #include <string>
 #include <map>
@@ -19,11 +24,11 @@ extern "C" {
 #include "codecs/VideoCodec.h"
 #include "media/MediaProcessor.h"
 #include "./logger.h"
+#include "rtp/RtpVP8Parser.h"
 
 namespace erizo {
-class WebRtcConnection;
 
-class ExternalInput : public MediaSource, public RTPDataReceiver {
+class ExternalInput : public MediaSource, public FeedbackSink, public RTPDataReceiver {
   DECLARE_LOGGER();
 
  public:
@@ -32,14 +37,20 @@ class ExternalInput : public MediaSource, public RTPDataReceiver {
   int init();
   void receiveRtpData(unsigned char* rtpdata, int len) override;
   int sendPLI() override;
+  int deliverFeedback_(std::shared_ptr<DataPacket> data_packet) override;
 
-  void close() override {}
+  boost::future<void> close() override {
+    std::shared_ptr<boost::promise<void>> p = std::make_shared<boost::promise<void>>();
+    p->set_value();
+    return p->get_future();
+  }
+
+  std::string getUrl() { return url_; }
 
  private:
   boost::scoped_ptr<OutputProcessor> op_;
   VideoDecoder inCodec_;
   boost::scoped_array<unsigned char> decodedBuffer_;
-  char sendVideoBuffer_[2000];
 
   std::string url_;
   bool running_;
@@ -56,9 +67,11 @@ class ExternalInput : public MediaSource, public RTPDataReceiver {
   int64_t lastPts_, lastAudioPts_;
   int64_t startTime_;
 
+  RtpVP8Parser vp8_parser_;
 
   void receiveLoop();
   void encodeLoop();
 };
 }  // namespace erizo
+
 #endif  // ERIZO_SRC_ERIZO_MEDIA_EXTERNALINPUT_H_

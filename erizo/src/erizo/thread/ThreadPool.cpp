@@ -6,6 +6,7 @@ constexpr int kNumThreadsPerScheduler = 2;
 
 using erizo::ThreadPool;
 using erizo::Worker;
+using erizo::DurationDistribution;
 
 ThreadPool::ThreadPool(unsigned int num_workers)
     : workers_{}, scheduler_{std::make_shared<Scheduler>(kNumThreadsPerScheduler)} {
@@ -29,8 +30,14 @@ std::shared_ptr<Worker> ThreadPool::getLessUsedWorker() {
 }
 
 void ThreadPool::start() {
+  std::vector<std::shared_ptr<std::promise<void>>> promises(workers_.size());
+  int index = 0;
   for (auto worker : workers_) {
-    worker->start();
+    promises[index] = std::make_shared<std::promise<void>>();
+    worker->start(promises[index++]);
+  }
+  for (auto promise : promises) {
+    promise->get_future().wait();
   }
 }
 
@@ -39,4 +46,26 @@ void ThreadPool::close() {
     worker->close();
   }
   scheduler_->stop(true);
+}
+
+DurationDistribution ThreadPool::getDurationDistribution() {
+  DurationDistribution total_durations;
+  for (auto worker : workers_) {
+    total_durations += worker->getDurationDistribution();
+  }
+  return total_durations;
+}
+
+DurationDistribution ThreadPool::getDelayDistribution() {
+  DurationDistribution total_delays;
+  for (auto worker : workers_) {
+    total_delays += worker->getDelayDistribution();
+  }
+  return total_delays;
+}
+
+void ThreadPool::resetStats() {
+  for (auto worker : workers_) {
+    worker->resetStats();
+  }
 }

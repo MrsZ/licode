@@ -1,3 +1,4 @@
+
 /*
  * RtpHeaders.h
  */
@@ -6,6 +7,8 @@
 #define ERIZO_SRC_ERIZO_RTP_RTPHEADERS_H_
 
 #include <netinet/in.h>
+#include <stdio.h>
+#include <string>
 
 namespace erizo {
 // Payload types
@@ -21,6 +24,8 @@ namespace erizo {
 #define RTCP_SLI_FMT           2
 #define RTCP_FIR_FMT           4
 #define RTCP_AFB              15
+#define RTCP_NACK_FMT         1
+#define RTCP_TRANSPORT_WIDE_FEEDBACK_FMT      15
 
 #define VP8_90000_PT        100  // VP8 Video Codec
 #define RED_90000_PT        116  // REDundancy (RFC 2198)
@@ -37,6 +42,21 @@ namespace erizo {
 #define CN_48000_PT         107  // CN Audio Codec
 #define TEL_8000_PT         126  // Tel Audio Events
 
+#define RTCP_MIN_PT         194  // per https://tools.ietf.org/html/rfc5761
+#define RTCP_MAX_PT         223
+
+#define RTCP_AUDIO_INTERVAL 5000
+#define RTCP_VIDEO_INTERVAL  1000
+
+// enum for video rotation.
+enum VideoRotation {
+  kVideoRotation_0 = 0,
+  kVideoRotation_90 = 90,
+  kVideoRotation_180 = 180,
+  kVideoRotation_270 = 270
+};
+
+static const uint16_t kNackCommonHeaderLengthBytes = 12;
 //    0                   1                   2                   3
 //    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -97,6 +117,10 @@ class RtpHeader {
 
   inline uint8_t hasPadding() const {
     return padding;
+  }
+
+  inline void setPadding(uint8_t has_padding) {
+    padding = has_padding;
   }
 
   inline uint8_t getVersion() const {
@@ -164,6 +188,93 @@ class RtpHeader {
   }
 };
 
+class GenericOneByteExtension {
+ public:
+  uint32_t ext_info:8;
+  char *data;
+  explicit GenericOneByteExtension(char *buf) {
+    ext_info = (uint8_t)(*buf);
+    uint8_t length = getLength() + 1;
+    data = reinterpret_cast<char *>(malloc(length + 1));
+    char *payload = buf + 1;
+    sprintf(data, "%*.*s", length, length, payload);  // NOLINT
+  }
+  ~GenericOneByteExtension() {
+    free(data);
+  }
+  inline uint8_t getId() {
+    return ext_info >> 4;
+  }
+  inline uint8_t getLength() {
+    return (ext_info & 0x0F);
+  }
+  inline char* getData() {
+    return data;
+  }
+};
+    //  0                   1                   2                   3
+    //   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    //  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    //  |       0xBE    |    0xDE       |           length=1            |
+    //  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    //  |  ID   | L=1   |transport-wide sequence number | zero padding  |
+    //  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+class TransportCcExtension {
+ public:
+  uint32_t length:4;
+  uint32_t id:4;
+  uint32_t data:16;
+  inline uint8_t getId() {
+    return id;
+  }
+  inline uint8_t getLength() {
+    return length;
+  }
+  inline void setId(uint8_t new_id) {
+    id = new_id;
+  }
+  inline void setLength(uint8_t new_length) {
+    length = new_length;
+  }
+  inline uint16_t getSeqNumber() {
+    return ntohs(data);
+  }
+  inline void setSeqNumber(uint16_t seqnum) {
+    data = htons(seqnum);
+  }
+};
+
+class VideoOrientation {
+ public:
+  uint32_t ext_info:8;
+  uint32_t rotation_data:8;
+  inline uint8_t getId() {
+    return ext_info >> 4;
+  }
+  inline uint8_t getLength() {
+    return (ext_info & 0x0F);
+  }
+  inline VideoRotation getVideoOrientation() {
+    return convertCVOByteToVideoRotation(rotation_data);
+  }
+  inline static VideoRotation convertCVOByteToVideoRotation(uint8_t cvo_byte) {
+    // CVO byte: |0 0 0 0 C F R R|.
+    const uint8_t rotation_bits = cvo_byte & 0x3;
+    switch (rotation_bits) {
+      case 0:
+        return kVideoRotation_0;
+      case 1:
+        return kVideoRotation_90;
+      case 2:
+        return kVideoRotation_180;
+      case 3:
+        return kVideoRotation_270;
+      default:
+        return kVideoRotation_0;
+    }
+  }
+};
+
 class AbsSendTimeExtension {
  public:
   uint32_t ext_info:8;
@@ -192,6 +303,33 @@ class RtpRtxHeader {
   }
   inline void setOs(uint16_t theOsn) {
     osn = htons(theOsn);
+  }
+};
+
+
+// Generic NACK RTCP_RTP_FB + (FMT 1)rfc4585
+//      0                   1                   2                   3
+//    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//   |            PID                |             BLP               |
+//   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+class NackBlock {
+ public:
+  uint32_t pid:16;
+  uint32_t blp:16;
+
+  inline uint16_t getNackPid() {
+    return ntohs(pid);
+  }
+  inline void setNackPid(uint16_t new_pid) {
+    pid = htons(new_pid);
+  }
+  inline uint16_t getNackBlp() {
+    return ntohs(blp);
+  }
+  inline void setNackBlp(uint16_t new_blp) {
+    blp = htons(new_blp);
   }
 };
 
@@ -299,16 +437,15 @@ class RtcpHeader {
       struct receiverReport_t rrlist[1];
     } senderReport;
 
-    // Generic NACK RTCP_RTP_FB + (FMT 1)rfc4585
-    //      0                   1                   2                   3
-    //    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-    //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-    //   |            PID                |             BLP               |
-    //   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    struct sdes_t {
+      uint32_t type:8;
+      uint32_t length:8;
+      char data[1];
+    } sdes;
+
     struct genericNack_t {
       uint32_t ssrcsource;
-      uint32_t pid:16;
-      uint32_t blp:16;
+      NackBlock nack_block;
     } nackPacket;
 
     struct remb_t {
@@ -316,13 +453,20 @@ class RtcpHeader {
       uint32_t uniqueid;
       uint32_t numssrc:8;
       uint32_t brLength :24;
-      uint32_t ssrcfeedb;
+      uint32_t ssrcfeedb[50];
     } rembPacket;
 
     struct pli_t {
       uint32_t ssrcsource;
       uint32_t fci;
     } pli;
+
+    struct fir_t {
+      uint32_t ssrcsource;
+      uint32_t mediasource;
+      uint32_t seqnumber:8;
+      uint32_t reserved:24;
+    } fir;
   } report;
 
   inline RtcpHeader() : blockcount(0), padding(0), version(2), packettype(0), length(0), ssrc(0) {
@@ -333,10 +477,26 @@ class RtcpHeader {
         packettype == RTCP_PS_Feedback_PT ||
         packettype == RTCP_RTP_Feedback_PT);
   }
+  inline bool isReceiverReport() {
+    return packettype == RTCP_Receiver_PT;
+  }
+  inline bool isSenderReport() {
+    return packettype == RTCP_Sender_PT;
+  }
+  inline bool isSDES() {
+    return packettype == RTCP_SDES_PT;
+  }
+  inline bool isNACK() {
+    return packettype == RTCP_RTP_Feedback_PT && blockcount == RTCP_NACK_FMT;
+  }
+  inline bool isTransportWideFeedback() {
+    return packettype == RTCP_RTP_Feedback_PT && blockcount == RTCP_TRANSPORT_WIDE_FEEDBACK_FMT;
+  }
+  inline bool isREMB() {
+    return packettype == RTCP_PS_Feedback_PT && blockcount == RTCP_AFB;
+  }
   inline bool isRtcp(void) {
-    return (packettype == RTCP_Sender_PT ||
-            packettype == RTCP_APP ||
-            isFeedback());
+    return (packettype >= RTCP_MIN_PT && packettype <= RTCP_MAX_PT);
   }
   inline uint8_t getPacketType() {
     return packettype;
@@ -410,7 +570,6 @@ class RtcpHeader {
   inline void setDelaySinceLastSr(uint32_t delaylastsr) {
     report.receiverReport.delaysincelast = htonl(delaylastsr);
   }
-
   inline uint32_t getPacketsSent() {
     return ntohl(report.senderReport.packetsent);
   }
@@ -420,20 +579,36 @@ class RtcpHeader {
   inline uint32_t getOctetsSent() {
     return ntohl(report.senderReport.octetssent);
   }
+  inline void setOctetsSent(uint32_t octets_sent) {
+    report.senderReport.octetssent = htonl(octets_sent);
+  }
   inline uint64_t getNtpTimestamp() {
     return (((uint64_t)htonl(report.senderReport.ntptimestamp)) << 32) + htonl(report.senderReport.ntptimestamp >> 32);
   }
+  inline void setNtpTimestamp(uint64_t ntp_timestamp) {
+    report.senderReport.ntptimestamp = (((uint64_t)ntohl(ntp_timestamp)) << 32) + ntohl(ntp_timestamp >> 32);
+  }
+  inline uint32_t get32MiddleNtp() {
+    uint64_t middle = (report.senderReport.ntptimestamp << 16) >> 32;
+    return ntohl(middle);
+  }
+  inline void setTimestamp(uint32_t timestamp) {
+    report.senderReport.rtprts = htonl(timestamp);
+  }
+  inline uint32_t getTimestamp() {
+    return ntohl(report.senderReport.rtprts);
+  }
   inline uint16_t getNackPid() {
-    return ntohs(report.nackPacket.pid);
+    return report.nackPacket.nack_block.getNackPid();
   }
   inline void setNackPid(uint16_t pid) {
-    report.nackPacket.pid = htons(pid);
+    report.nackPacket.nack_block.setNackPid(pid);
   }
   inline uint16_t getNackBlp() {
-    return report.nackPacket.blp;
+    return report.nackPacket.nack_block.getNackBlp();
   }
   inline void setNackBlp(uint16_t blp) {
-    report.nackPacket.blp = blp;
+    report.nackPacket.nack_block.setNackBlp(blp);
   }
   inline void setREMBBitRate(uint64_t bitRate) {
     uint64_t max = 0x3FFFF;  // 18 bits
@@ -449,7 +624,7 @@ class RtcpHeader {
     report.rembPacket.brLength = htonl(line) >> 8;
   }
   inline uint64_t getREMBBitRate() {
-    return getBrMantis() + (getBrExp() << 18);
+    return getBrMantis() << getBrExp();
   }
 
   inline uint32_t getBrExp() {
@@ -465,17 +640,32 @@ class RtcpHeader {
   inline void setREMBNumSSRC(uint8_t num) {
     report.rembPacket.numssrc = num;
   }
-  inline uint32_t getREMBFeedSSRC() {
-    return ntohl(report.rembPacket.ssrcfeedb);
+  inline uint32_t getREMBFeedSSRC(uint8_t index) {
+    return ntohl(report.rembPacket.ssrcfeedb[index]);
   }
-  inline void setREMBFeedSSRC(uint32_t ssrc) {
-     report.rembPacket.ssrcfeedb = htonl(ssrc);
+  inline void setREMBFeedSSRC(uint8_t index, uint32_t ssrc) {
+     report.rembPacket.ssrcfeedb[index] = htonl(ssrc);
   }
   inline uint32_t getFCI() {
     return ntohl(report.pli.fci);
   }
   inline void setFCI(uint32_t fci) {
     report.pli.fci = htonl(fci);
+  }
+  inline void setFIRSourceSSRC(uint32_t ssrc) {
+    report.fir.mediasource = htonl(ssrc);
+  }
+  inline void setFIRSequenceNumber(uint8_t seq_number) {
+    report.fir.seqnumber = seq_number;
+  }
+  inline uint32_t getSDESType() {
+    return report.sdes.type;
+  }
+  inline uint32_t getSDESLength() {
+    return report.sdes.length;
+  }
+  inline char* getSDESData() {
+    return report.sdes.data;
   }
 };
 

@@ -1,0 +1,29 @@
+{
+  "name": "licode-spine",
+  "version": "0.1.0",
+  "description": "Open Source Communication Provider - Spine",
+  "license": "MIT",
+  "private": true,
+  "devDependencies": {},
+  "dependencies": {
+    "log4js": "~6.4.0",
+    "node-getopt": "~0.3.2",
+    "socket.io-client": "~2.5.0",
+    "xmlhttprequest": "~1.7.0"
+  },
+  "contributors": [
+    {
+      "name": "Alvaro Alonso",
+      "email": "aalonsog@dit.upm.es"
+    },
+    {
+      "name": "Pedro Rodriguez",
+      "email": "prodriguez@dit.upm.es"
+    },
+    {
+      "name": "Javier Cerviño",
+      "email": "jcervino@dit.upm.es"
+    }
+  ],
+  "scripts": {}
+}

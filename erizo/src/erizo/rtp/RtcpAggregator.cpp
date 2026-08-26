@@ -23,8 +23,8 @@ namespace erizo {
 
 DEFINE_LOGGER(RtcpAggregator, "rtp.RtcpAggregator");
 
-RtcpAggregator::RtcpAggregator(MediaSink* msink, MediaSource* msource, uint32_t maxVideoBw)
-    : RtcpProcessor(msink, msource, maxVideoBw), defaultVideoBw_(maxVideoBw / 2) {
+RtcpAggregator::RtcpAggregator(MediaSink* msink, MediaSource* msource, uint32_t max_video_bw)
+    : RtcpProcessor(msink, msource, max_video_bw), defaultVideoBw_(max_video_bw / 2) {
   ELOG_DEBUG("Starting RtcpAggregator");
 }
 
@@ -42,12 +42,8 @@ void RtcpAggregator::addSourceSsrc(uint32_t ssrc) {
   }
 }
 
-void RtcpAggregator::setMaxVideoBW(uint32_t bandwidth) {
-  this->maxVideoBw_ = bandwidth;
-}
-
 void RtcpAggregator::setPublisherBW(uint32_t bandwidth) {
-  defaultVideoBw_ = (bandwidth*1.2) > maxVideoBw_? maxVideoBw_:(bandwidth*1.2);
+  defaultVideoBw_ = (bandwidth*1.2) > max_video_bw_? max_video_bw_:(bandwidth*1.2);
 }
 
 void RtcpAggregator::analyzeSr(RtcpHeader* chead) {
@@ -63,7 +59,7 @@ void RtcpAggregator::analyzeSr(RtcpHeader* chead) {
   uint32_t ntp;
   uint64_t theNTP = chead->getNtpTimestamp();
   ntp = (theNTP & (0xFFFFFFFF0000)) >> 16;
-  theData->senderReports.push_back(boost::shared_ptr<SrData>( new SrData(ntp, now)));
+  theData->senderReports.push_back(boost::shared_ptr<SrDelayData>( new SrDelayData(recvSSRC, ntp, now)));
   // We only store the last 20 sr
   if (theData->senderReports.size() > 20) {
     theData->senderReports.pop_front();
@@ -91,7 +87,8 @@ int RtcpAggregator::analyzeFeedback(char *buf, int len) {
     uint16_t currentNackPos = 0;
     uint16_t blp = 0;
     uint32_t lostPacketSeq = 0;
-    uint32_t calculatedlsr, delay, calculateLastSr, extendedSeqNo;
+    uint32_t delay = 0;
+    uint32_t calculatedlsr, calculateLastSr, extendedSeqNo;
 
     do {
       movingBuf += rtcpLength;
@@ -107,7 +104,7 @@ int RtcpAggregator::analyzeFeedback(char *buf, int len) {
           break;
         case RTCP_Receiver_PT:
           theData->rrsReceivedInPeriod++;
-          if (chead->getSourceSSRC() == rtcpSource_->getVideoSourceSSRC()) {
+          if (rtcpSource_->isVideoSourceSSRC(chead->getSourceSSRC())) {
             ELOG_DEBUG("Analyzing Video RR: PacketLost %u, Ratio %u, partNum %d, blocks %d, sourceSSRC %u, ssrc %u",
                         chead->getLostPackets(), chead->getFractionLost(), partNum, chead->getBlockCount(),
                         chead->getSourceSSRC(), chead->getSSRC());
@@ -130,10 +127,10 @@ int RtcpAggregator::analyzeFeedback(char *buf, int len) {
           theData->jitter = theData->jitter > chead->getJitter()? theData->jitter: chead->getJitter();
           calculateLastSr = chead->getLastSr();
           calculatedlsr = (chead->getDelaySinceLastSr() * 1000) / 65536;
-          for (std::list<boost::shared_ptr<SrData>>::iterator it = theData->senderReports.begin();
+          for (std::list<boost::shared_ptr<SrDelayData>>::iterator it = theData->senderReports.begin();
                         it != theData->senderReports.end(); ++it) {
-            if ((*it)->srNtp == calculateLastSr) {
-              uint64_t sentts = (*it)->timestamp;
+            if ((*it)->sr_ntp == calculateLastSr) {
+              uint64_t sentts = (*it)->sr_send_time;
               delay = nowms - sentts - calculatedlsr;
             }
           }
@@ -151,48 +148,50 @@ int RtcpAggregator::analyzeFeedback(char *buf, int len) {
           break;
         case RTCP_RTP_Feedback_PT:
           {
-            ELOG_DEBUG("RTP FB: Usually NACKs: %u, partNum %d", chead->getBlockCount(), partNum);
-            ELOG_DEBUG("NACK PID %u BLP %u", chead->getNackPid(), chead->getNackBlp());
-            // We analyze NACK to avoid sending repeated NACKs
-            blp = chead->getNackBlp();
-            theData->shouldSendNACK = false;
-            std::pair<std::set<uint32_t>::iterator, bool> ret;
-            ret = theData->nackedPackets_.insert(chead->getNackPid());
-            if (ret.second) {
-              ELOG_DEBUG("We received PID NACK for unacked packet %u", chead->getNackPid());
-              theData->shouldSendNACK = true;
-            } else {
-              if (theData->nackedPackets_.size() >= MAP_NACK_SIZE) {
-                while (theData->nackedPackets_.size() >= MAP_NACK_SIZE) {
-                  theData->nackedPackets_.erase(theData->nackedPackets_.begin());
-                }
-              }
-              ELOG_DEBUG("We received PID NACK for ALREADY acked packet %u", chead->getNackPid());
-            }
-            if (blp != 0) {
-              for (int i = 0; i < 16; i++) {
-                currentNackPos = blp & 0x0001;
-                blp = blp >> 1;
-
-                if (currentNackPos == 1) {
-                  lostPacketSeq = chead->getNackPid() + 1 + i;
-                  ret = theData->nackedPackets_.insert(lostPacketSeq);
-                  if (ret.second) {
-                    ELOG_DEBUG("We received NACK for unacked packet %u", lostPacketSeq);
-                  } else {
-                    ELOG_DEBUG("We received NACK for ALREADY acked packet %u", lostPacketSeq);
+            if (chead->isNACK()) {
+              ELOG_DEBUG("RTP FB - NACKs: %u, partNum %d", chead->getBlockCount(), partNum);
+              ELOG_DEBUG("NACK PID %u BLP %u", chead->getNackPid(), chead->getNackBlp());
+              // We analyze NACK to avoid sending repeated NACKs
+              blp = chead->getNackBlp();
+              theData->shouldSendNACK = false;
+              std::pair<std::set<uint32_t>::iterator, bool> ret;
+              ret = theData->nackedPackets_.insert(chead->getNackPid());
+              if (ret.second) {
+                ELOG_DEBUG("We received PID NACK for unacked packet %u", chead->getNackPid());
+                theData->shouldSendNACK = true;
+              } else {
+                if (theData->nackedPackets_.size() >= MAP_NACK_SIZE) {
+                  while (theData->nackedPackets_.size() >= MAP_NACK_SIZE) {
+                    theData->nackedPackets_.erase(theData->nackedPackets_.begin());
                   }
-                  theData->shouldSendNACK |=ret.second;
+                }
+                ELOG_DEBUG("We received PID NACK for ALREADY acked packet %u", chead->getNackPid());
+              }
+              if (blp != 0) {
+                for (int i = 0; i < 16; i++) {
+                  currentNackPos = blp & 0x0001;
+                  blp = blp >> 1;
+
+                  if (currentNackPos == 1) {
+                    lostPacketSeq = chead->getNackPid() + 1 + i;
+                    ret = theData->nackedPackets_.insert(lostPacketSeq);
+                    if (ret.second) {
+                      ELOG_DEBUG("We received NACK for unacked packet %u", lostPacketSeq);
+                    } else {
+                      ELOG_DEBUG("We received NACK for ALREADY acked packet %u", lostPacketSeq);
+                    }
+                    theData->shouldSendNACK |=ret.second;
+                  }
                 }
               }
-            }
-            if (theData->shouldSendNACK) {
-              ELOG_DEBUG("Will send NACK");
-              theData->nackSeqnum = chead->getNackPid();
-              theData->nackBlp = chead->getNackBlp();
-              theData->requestRr = true;
-            } else {
-              ELOG_DEBUG("I'm ignoring a NACK");
+              if (theData->shouldSendNACK) {
+                ELOG_DEBUG("Will send NACK");
+                theData->nackSeqnum = chead->getNackPid();
+                theData->nackBlp = chead->getNackBlp();
+                theData->requestRr = true;
+              } else {
+                ELOG_DEBUG("I'm ignoring a NACK");
+              }
             }
           }
           break;
@@ -242,7 +241,6 @@ int RtcpAggregator::analyzeFeedback(char *buf, int len) {
   }
   return 0;
 }
-
 
 void RtcpAggregator::checkRtcpFb() {
   boost::mutex::scoped_lock mlock(mapLock_);
@@ -339,10 +337,12 @@ void RtcpAggregator::checkRtcpFb() {
           length = theLen;
         }
       }
-      if  (sourceSsrc == rtcpSource_->getVideoSourceSSRC()) {
-        rtcpSink_->deliverVideoData(reinterpret_cast<char*>(packet_), length);
+      if  (rtcpSource_->isVideoSourceSSRC(sourceSsrc)) {
+        rtcpSink_->deliverVideoData(std::make_shared<DataPacket>(0, reinterpret_cast<char*>(packet_),
+              length, VIDEO_PACKET));
       } else {
-        rtcpSink_->deliverAudioData(reinterpret_cast<char*>(packet_), length);
+        rtcpSink_->deliverAudioData(std::make_shared<DataPacket>(0, reinterpret_cast<char*>(packet_),
+              length, AUDIO_PACKET));
       }
       rtcpData->last_rr_sent = now;
       if (dt_scheduled > rtcpData->nextPacketInMs) {  // Every scheduled packet we reset
@@ -356,10 +356,10 @@ void RtcpAggregator::checkRtcpFb() {
 
       float random = (rand_r(&thread_number) % 100 + 50) / 100.0;
       if (rtcpData->mediaType == AUDIO_TYPE) {
-        rtcpData->nextPacketInMs = RR_AUDIO_PERIOD*random;
+        rtcpData->nextPacketInMs = RTCP_AUDIO_INTERVAL*random;
         ELOG_DEBUG("Scheduled next Audio RR in %u ms", rtcpData->nextPacketInMs);
       } else {
-        rtcpData->nextPacketInMs = (RR_VIDEO_BASE)*random;
+        rtcpData->nextPacketInMs = (RTCP_VIDEO_INTERVAL)*random;
         ELOG_DEBUG("Scheduled next Video RR in %u ms", rtcpData->nextPacketInMs);
       }
 
@@ -386,7 +386,7 @@ int RtcpAggregator::addREMB(char* buf, int len, uint32_t bitrate) {
   theREMB.setLength(5);
   theREMB.setREMBBitRate(bitrate);
   theREMB.setREMBNumSSRC(1);
-  theREMB.setREMBFeedSSRC(rtcpSource_->getVideoSourceSSRC());
+  theREMB.setREMBFeedSSRC(0, rtcpSource_->getVideoSourceSSRC());
   int rembLength = (theREMB.getLength()+1)*4;
 
   memcpy(buf, reinterpret_cast<uint8_t*>(&theREMB), rembLength);
